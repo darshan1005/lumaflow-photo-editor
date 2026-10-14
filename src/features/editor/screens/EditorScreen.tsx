@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Image,
@@ -49,9 +49,29 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   // Zoom & Pan state
   const [zoomScale, setZoomScale] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const zoomScaleRef = useRef(1);
+  const panOffsetRef = useRef({ x: 0, y: 0 });
+  const activeTabRef = useRef<string>('adjust');
+  const isDraggingSplitRef = useRef(false);
   const lastPinchDistance = useRef(0);
-  const lastPanOffset = useRef({ x: 0, y: 0 });
-  const lastZoomScale = useRef(1);
+  const initialPinchCenter = useRef({ x: 0, y: 0 });
+  const initialPanOffset = useRef({ x: 0, y: 0 });
+  const initialZoomScale = useRef(1);
+  const isPinching = useRef(false);
+  const isPanning = useRef(false);
+  const maxPanXRef = useRef(0);
+  const maxPanYRef = useRef(0);
+  const viewportWidthRef = useRef(360);
+  const viewportHeightRef = useRef(360);
+  const imgDisplayWidthRef = useRef(360);
+  const imgDisplayHeightRef = useRef(360);
+  const lastTapRef = useRef({ time: 0, x: 0, y: 0 });
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const initialPointerDistanceRef = useRef(0);
+  const initialPointerCenterRef = useRef({ x: 0, y: 0 });
+  const dragStartPosRef = useRef({ x: 0, y: 0 });
+  const hasMovedSignificantlyRef = useRef(false);
+  const longPressTimerRef = useRef<any>(null);
 
   const activeProject = useEditorStore(state => state.activeProject);
   const currentDoc = useEditorStore(state => state.currentDocument);
@@ -216,6 +236,89 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   const g = currentDoc.colorGrading;
   const m = currentDoc.hslMixer;
 
+  const getPanLimits = useCallback((scale: number) => {
+    const w = imgDisplayWidthRef.current || 360;
+    const h = imgDisplayHeightRef.current || 360;
+    const limitX = scale > 1 ? Math.max(0, (w * scale - w) / 2) : 0;
+    const limitY = scale > 1 ? Math.max(0, (h * scale - h) / 2) : 0;
+    return { limitX, limitY };
+  }, []);
+
+  const handleDoubleTapAt = useCallback((clientX: number, clientY: number) => {
+    // If already zoomed in, double-tap smoothly resets zoom back to 1.0x fit
+    if (zoomScaleRef.current > 1.05) {
+      setZoomScale(1);
+      setPanOffset({ x: 0, y: 0 });
+      initialZoomScale.current = 1;
+      initialPanOffset.current = { x: 0, y: 0 };
+      return;
+    }
+
+    // Measure tap coordinates relative to viewport center
+    let localX = viewportWidthRef.current / 2;
+    let localY = viewportHeightRef.current / 2;
+
+    if (Platform.OS === 'web' && viewportRef.current) {
+      const domNode = (viewportRef.current as any)._touchableNode || viewportRef.current;
+      if (domNode && domNode.getBoundingClientRect) {
+        const rect = domNode.getBoundingClientRect();
+        localX = clientX - rect.left;
+        localY = clientY - rect.top;
+      } else {
+        localX = clientX;
+        localY = clientY;
+      }
+    } else {
+      localX = clientX;
+      localY = clientY;
+    }
+
+    const deltaX = localX - viewportWidthRef.current / 2;
+    const deltaY = localY - viewportHeightRef.current / 2;
+
+    const targetScale = 2.5;
+    const { limitX, limitY } = getPanLimits(targetScale);
+
+    // Center the zoomed view on the tapped point and clamp within frame
+    const targetPanX = -deltaX * targetScale;
+    const targetPanY = -deltaY * targetScale;
+
+    const clampedX = Math.max(-limitX, Math.min(limitX, targetPanX));
+    const clampedY = Math.max(-limitY, Math.min(limitY, targetPanY));
+
+    setZoomScale(targetScale);
+    setPanOffset({ x: clampedX, y: clampedY });
+    initialZoomScale.current = targetScale;
+    initialPanOffset.current = { x: clampedX, y: clampedY };
+  }, [getPanLimits]);
+
+  const handleViewportPressAt = useCallback((clientX: number, clientY: number) => {
+    if (activeTabRef.current !== 'erase') return;
+    let localX = clientX;
+    let localY = clientY;
+    if (Platform.OS === 'web' && viewportRef.current) {
+      const domNode = (viewportRef.current as any)._touchableNode || viewportRef.current;
+      if (domNode && domNode.getBoundingClientRect) {
+        const rect = domNode.getBoundingClientRect();
+        localX = clientX - rect.left;
+        localY = clientY - rect.top;
+      }
+    }
+    const vpW = viewportWidthRef.current || 360;
+    const vpH = viewportHeightRef.current || 360;
+    const x = localX / vpW;
+    const y = localY / vpH;
+    addHealingSpot({
+      x: Math.max(0.05, Math.min(0.95, x)),
+      y: Math.max(0.05, Math.min(0.95, y)),
+      radius: 0.04,
+      sourceX: Math.max(0.05, Math.min(0.95, x + 0.05)),
+      sourceY: Math.max(0.05, Math.min(0.95, y)),
+      mode: 'heal',
+      opacity: 100
+    });
+  }, [addHealingSpot]);
+
   // Split Divider PanResponder - using pageX for reliable tracking
   const splitDividerPageXRef = useRef(0);
   const viewportPageXRef = useRef(0);
@@ -226,6 +329,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
+        isDraggingSplitRef.current = true;
         // Measure viewport position
         if (viewportRef.current) {
           viewportRef.current.measureInWindow((x: number) => {
@@ -241,44 +345,123 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
           const newPos = Math.max(0.05, Math.min(0.95, localX / vpW));
           setSplitPosition(newPos);
         }
+      },
+      onPanResponderRelease: () => {
+        isDraggingSplitRef.current = false;
+      },
+      onPanResponderTerminate: () => {
+        isDraggingSplitRef.current = false;
       }
     })
   ).current;
 
-  // Pinch-to-zoom PanResponder for the viewport (only when not in split/erase mode)
+  // Pinch-to-zoom & Pan PanResponder for the viewport
   const zoomPanResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: (evt) => {
-        return (evt?.nativeEvent?.touches?.length ?? 0) >= 2;
+      onStartShouldSetPanResponderCapture: (evt) => {
+        if (isDraggingSplitRef.current) return false;
+        const touches = evt?.nativeEvent?.touches?.length ?? 0;
+        return touches >= 2;
       },
-      onMoveShouldSetPanResponder: (evt) => {
-        return (evt?.nativeEvent?.touches?.length ?? 0) >= 2;
+      onMoveShouldSetPanResponderCapture: (evt, gestureState) => {
+        if (isDraggingSplitRef.current) return false;
+        const touches = evt?.nativeEvent?.touches?.length ?? 0;
+        if (touches >= 2) return true;
+        if (zoomScaleRef.current > 1.05 && activeTabRef.current !== 'crop') {
+          return Math.abs(gestureState.dx) > 6 || Math.abs(gestureState.dy) > 6;
+        }
+        return false;
       },
-      onPanResponderGrant: (evt) => {
+      onPanResponderGrant: (evt, gestureState) => {
         const touches = evt?.nativeEvent?.touches;
         if (touches && touches.length >= 2 && touches[0] && touches[1]) {
+          isPinching.current = true;
+          isPanning.current = false;
           const dx = touches[1].pageX - touches[0].pageX;
           const dy = touches[1].pageY - touches[0].pageY;
-          lastPinchDistance.current = Math.sqrt(dx * dx + dy * dy);
-          lastZoomScale.current = zoomScale;
-          lastPanOffset.current = { ...panOffset };
+          lastPinchDistance.current = Math.hypot(dx, dy);
+          initialPinchCenter.current = {
+            x: (touches[0].pageX + touches[1].pageX) / 2,
+            y: (touches[0].pageY + touches[1].pageY) / 2,
+          };
+          initialZoomScale.current = zoomScaleRef.current;
+          initialPanOffset.current = { ...panOffsetRef.current };
+        } else if (zoomScaleRef.current > 1.05) {
+          isPanning.current = true;
+          isPinching.current = false;
+          initialPanOffset.current = { ...panOffsetRef.current };
         }
       },
-      onPanResponderMove: (evt) => {
+      onPanResponderMove: (evt, gestureState) => {
         const touches = evt?.nativeEvent?.touches;
+        // Two-finger Pinch Zoom (and pan)
         if (touches && touches.length >= 2 && touches[0] && touches[1]) {
           const dx = touches[1].pageX - touches[0].pageX;
           const dy = touches[1].pageY - touches[0].pageY;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (lastPinchDistance.current > 0) {
-            const scaleRatio = dist / lastPinchDistance.current;
-            const newScale = Math.max(1, Math.min(5, lastZoomScale.current * scaleRatio));
+          const dist = Math.hypot(dx, dy);
+          if (lastPinchDistance.current > 10) {
+            const scaleFactor = dist / lastPinchDistance.current;
+            const newScale = Math.max(1.0, Math.min(5.0, initialZoomScale.current * scaleFactor));
             setZoomScale(newScale);
+
+            // Follow center point shift
+            const centerX = (touches[0].pageX + touches[1].pageX) / 2;
+            const centerY = (touches[0].pageY + touches[1].pageY) / 2;
+            const shiftX = centerX - initialPinchCenter.current.x;
+            const shiftY = centerY - initialPinchCenter.current.y;
+            const targetX = initialPanOffset.current.x + shiftX;
+            const targetY = initialPanOffset.current.y + shiftY;
+            const limitX = Math.max(0, (viewportWidth * newScale - viewportWidth) / 2);
+            const limitY = Math.max(0, (viewportHeight * newScale - viewportHeight) / 2);
+            setPanOffset({
+              x: Math.max(-limitX, Math.min(limitX, targetX)),
+              y: Math.max(-limitY, Math.min(limitY, targetY))
+            });
+          }
+        }
+        // One-finger Pan when zoomed in
+        else if (isPanning.current && zoomScaleRef.current > 1.05) {
+          const targetX = initialPanOffset.current.x + gestureState.dx;
+          const targetY = initialPanOffset.current.y + gestureState.dy;
+          const clampedX = Math.max(-maxPanXRef.current, Math.min(maxPanXRef.current, targetX));
+          const clampedY = Math.max(-maxPanYRef.current, Math.min(maxPanYRef.current, targetY));
+          setPanOffset({ x: clampedX, y: clampedY });
+        }
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        isPinching.current = false;
+        isPanning.current = false;
+        lastPinchDistance.current = 0;
+
+        // Keep zoom scale and pan offset FIXED where user released
+        initialZoomScale.current = zoomScaleRef.current;
+        initialPanOffset.current = { ...panOffsetRef.current };
+
+        // Double-tap detection on mobile
+        if (Math.abs(gestureState.dx) < 8 && Math.abs(gestureState.dy) < 8) {
+          const now = Date.now();
+          const timeDiff = now - lastTapRef.current.time;
+          const locX = evt.nativeEvent?.locationX ?? (viewportWidthRef.current / 2);
+          const locY = evt.nativeEvent?.locationY ?? (viewportHeightRef.current / 2);
+          const distDiff = Math.hypot(locX - lastTapRef.current.x, locY - lastTapRef.current.y);
+
+          if (timeDiff < 320 && distDiff < 40) {
+            lastTapRef.current = { time: 0, x: 0, y: 0 };
+            handleDoubleTapAt(locX, locY);
+          } else {
+            lastTapRef.current = { time: now, x: locX, y: locY };
+            if (activeTabRef.current === 'erase') {
+              handleViewportPressAt(locX, locY);
+            }
           }
         }
       },
-      onPanResponderRelease: () => {
+      onPanResponderTerminate: () => {
+        isPinching.current = false;
+        isPanning.current = false;
         lastPinchDistance.current = 0;
+        initialZoomScale.current = zoomScaleRef.current;
+        initialPanOffset.current = { ...panOffsetRef.current };
       }
     })
   ).current;
@@ -363,11 +546,16 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     : `brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`;
 
   const webFilterStyle: any = isHoldingOriginal
-    ? {}
+    ? {
+        transform: [
+          { rotate: `${crop.rotation + crop.straightenAngle}deg` },
+          { scaleX: crop.flipHorizontal ? -1 : 1 },
+          { scaleY: crop.flipVertical ? -1 : 1 }
+        ]
+      }
     : {
         filter: webFilterString,
         transform: [
-          { scale: zoomScale },
           { rotate: `${crop.rotation + crop.straightenAngle}deg` },
           { scaleX: crop.flipHorizontal ? -1 : 1 },
           { scaleY: crop.flipVertical ? -1 : 1 }
@@ -408,6 +596,184 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     imgDisplayHeight = Math.round(vpW / imgRatio);
   }
 
+  // Sync image display dimensions to refs for instant gesture calculations
+  imgDisplayWidthRef.current = imgDisplayWidth;
+  imgDisplayHeightRef.current = imgDisplayHeight;
+
+  // Web Pointer & Wheel listeners for desktop & mobile web
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const vp = viewportRef.current as any;
+    if (!vp) return;
+    const domNode = vp._touchableNode || vp;
+    if (!domNode || !domNode.addEventListener) return;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (isDraggingSplitRef.current) return;
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (activePointersRef.current.size === 1) {
+        dragStartPosRef.current = { x: e.clientX, y: e.clientY };
+        initialPanOffset.current = { ...panOffsetRef.current };
+        hasMovedSignificantlyRef.current = false;
+
+        // Long press detection for original photo preview
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = setTimeout(() => {
+          if (!hasMovedSignificantlyRef.current && activePointersRef.current.size === 1) {
+            setHoldingOriginal(true);
+          }
+        }, 400);
+      } else if (activePointersRef.current.size === 2) {
+        // Multi-touch pinch zoom started
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        setHoldingOriginal(false);
+        isPinching.current = true;
+        const pts = Array.from(activePointersRef.current.values());
+        initialPointerDistanceRef.current = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        initialPointerCenterRef.current = {
+          x: (pts[0].x + pts[1].x) / 2,
+          y: (pts[0].y + pts[1].y) / 2,
+        };
+        initialZoomScale.current = zoomScaleRef.current;
+        initialPanOffset.current = { ...panOffsetRef.current };
+      }
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (isDraggingSplitRef.current) return;
+      if (!activePointersRef.current.has(e.pointerId)) return;
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      // Multi-touch Pinch Zoom
+      if (activePointersRef.current.size >= 2) {
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        const pts = Array.from(activePointersRef.current.values());
+        const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+        if (initialPointerDistanceRef.current > 10) {
+          const factor = dist / initialPointerDistanceRef.current;
+          const newScale = Math.max(1.0, Math.min(5.0, initialZoomScale.current * factor));
+          setZoomScale(newScale);
+
+          const curCenter = {
+            x: (pts[0].x + pts[1].x) / 2,
+            y: (pts[0].y + pts[1].y) / 2,
+          };
+          const shiftX = curCenter.x - initialPointerCenterRef.current.x;
+          const shiftY = curCenter.y - initialPointerCenterRef.current.y;
+
+          const { limitX, limitY } = getPanLimits(newScale);
+          const targetX = initialPanOffset.current.x + shiftX;
+          const targetY = initialPanOffset.current.y + shiftY;
+          setPanOffset({
+            x: Math.max(-limitX, Math.min(limitX, targetX)),
+            y: Math.max(-limitY, Math.min(limitY, targetY)),
+          });
+        }
+      }
+      // Single Pointer Pan (when zoomed in)
+      else if (activePointersRef.current.size === 1) {
+        const dx = e.clientX - dragStartPosRef.current.x;
+        const dy = e.clientY - dragStartPosRef.current.y;
+        if (Math.hypot(dx, dy) > 6) {
+          hasMovedSignificantlyRef.current = true;
+          if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        }
+
+        if (zoomScaleRef.current > 1.05 && activeTabRef.current !== 'crop') {
+          const { limitX, limitY } = getPanLimits(zoomScaleRef.current);
+          const targetX = initialPanOffset.current.x + dx;
+          const targetY = initialPanOffset.current.y + dy;
+          setPanOffset({
+            x: Math.max(-limitX, Math.min(limitX, targetX)),
+            y: Math.max(-limitY, Math.min(limitY, targetY)),
+          });
+        }
+      }
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      setHoldingOriginal(false);
+
+      const hadMultiple = activePointersRef.current.size >= 2;
+      activePointersRef.current.delete(e.pointerId);
+
+      if (hadMultiple && activePointersRef.current.size < 2) {
+        // Pinching stopped: FIX zoom scale and pan offset exactly where user released
+        isPinching.current = false;
+        initialZoomScale.current = zoomScaleRef.current;
+        initialPanOffset.current = { ...panOffsetRef.current };
+        return;
+      }
+
+      if (activePointersRef.current.size === 0) {
+        // Dragging finished: keep pan fixed where user released
+        initialPanOffset.current = { ...panOffsetRef.current };
+
+        // Tap or Double Tap detection (if pointer didn't drag significantly)
+        if (!hasMovedSignificantlyRef.current) {
+          const now = Date.now();
+          const lastTap = lastTapRef.current;
+          const timeDiff = now - lastTap.time;
+          const distDiff = Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y);
+
+          if (timeDiff < 320 && distDiff < 35) {
+            lastTapRef.current = { time: 0, x: 0, y: 0 };
+            handleDoubleTapAt(e.clientX, e.clientY);
+          } else {
+            lastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
+            if (activeTabRef.current === 'erase') {
+              handleViewportPressAt(e.clientX, e.clientY);
+            }
+          }
+        }
+      }
+    };
+
+    const onWheelNative = (e: WheelEvent) => {
+      // Trackpad pinch gesture on desktop web (ctrlKey or metaKey)
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.012);
+        setZoomScale(prev => {
+          const next = Math.max(1.0, Math.min(5.0, prev * factor));
+          initialZoomScale.current = next;
+          const { limitX, limitY } = getPanLimits(next);
+          setPanOffset(curPan => ({
+            x: Math.max(-limitX, Math.min(limitX, curPan.x)),
+            y: Math.max(-limitY, Math.min(limitY, curPan.y))
+          }));
+          return next;
+        });
+      } else if (zoomScaleRef.current > 1.05) {
+        // Trackpad 2-finger scroll or wheel panning across zoomed image
+        e.preventDefault();
+        const { limitX, limitY } = getPanLimits(zoomScaleRef.current);
+        setPanOffset(prev => {
+          const nextX = Math.max(-limitX, Math.min(limitX, prev.x - e.deltaX));
+          const nextY = Math.max(-limitY, Math.min(limitY, prev.y - e.deltaY));
+          initialPanOffset.current = { x: nextX, y: nextY };
+          return { x: nextX, y: nextY };
+        });
+      }
+    };
+
+    domNode.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    domNode.addEventListener('wheel', onWheelNative, { passive: false });
+
+    return () => {
+      domNode.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      domNode.removeEventListener('wheel', onWheelNative);
+    };
+  }, [getPanLimits, handleDoubleTapAt, handleViewportPressAt]);
+
   // Vignette parameters
   const isVignetteActive = !isHoldingOriginal && Math.abs(b.vignette) > 2;
   const vignetteAlpha = Math.min(0.9, Math.abs(b.vignette / 100) * 0.9);
@@ -416,39 +782,6 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   // Film Grain parameters
   const isGrainActive = !isHoldingOriginal && b.grain > 2;
   const grainAlpha = Math.min(0.65, (b.grain / 100) * 0.65);
-
-  // Handle tap on photo during Smart Erase tab
-  const handleViewportPress = (evt: any) => {
-    if (activeTab === 'erase' && viewportWidth > 0 && viewportHeight > 0) {
-      const x = evt.nativeEvent.locationX / viewportWidth;
-      const y = evt.nativeEvent.locationY / viewportHeight;
-      addHealingSpot({
-        x: Math.max(0.05, Math.min(0.95, x)),
-        y: Math.max(0.05, Math.min(0.95, y)),
-        radius: 0.04,
-        sourceX: Math.max(0.05, Math.min(0.95, x + 0.05)),
-        sourceY: Math.max(0.05, Math.min(0.95, y)),
-        mode: 'heal',
-        opacity: 100
-      });
-    }
-  };
-
-  // Double-tap to reset zoom
-  const lastTapRef = useRef(0);
-  const handleDoubleTap = useCallback(() => {
-    const now = Date.now();
-    if (now - lastTapRef.current < 300) {
-      // Double tap detected - toggle zoom
-      if (zoomScale > 1) {
-        setZoomScale(1);
-        setPanOffset({ x: 0, y: 0 });
-      } else {
-        setZoomScale(2);
-      }
-    }
-    lastTapRef.current = now;
-  }, [zoomScale]);
 
   const handleExport = async (options: ExportOptions) => {
     try {
@@ -702,7 +1035,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         </View>
 
         <View style={styles.actionGroup}>
-          {zoomScale > 1 && (
+          {zoomScale > 1.05 && (
             <TouchableOpacity
               style={styles.smallBtn}
               onPress={() => { setZoomScale(1); setPanOffset({ x: 0, y: 0 }); }}
@@ -726,18 +1059,22 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         onLayout={e => {
           setViewportWidth(e.nativeEvent.layout.width);
           setViewportHeight(e.nativeEvent.layout.height);
+          viewportWidthRef.current = e.nativeEvent.layout.width;
+          viewportHeightRef.current = e.nativeEvent.layout.height;
         }}
+        {...zoomPanResponder.panHandlers}
       >
         {activeProject?.sourceUri ? (
-          <TouchableOpacity
-            activeOpacity={1}
-            style={styles.viewportInner}
-            onPress={(e) => {
-              handleDoubleTap();
-              handleViewportPress(e);
-            }}
-            onLongPress={() => setHoldingOriginal(true)}
-            onPressOut={() => setHoldingOriginal(false)}
+          <View
+            style={[
+              styles.viewportInner,
+              Platform.OS === 'web' ? ({
+                touchAction: 'none',
+                cursor: zoomScale > 1.05 ? 'grab' : 'zoom-in',
+                userSelect: 'none',
+                WebkitUserSelect: 'none'
+              } as any) : {}
+            ]}
           >
             {/* SVG Photometric Filter for Web (Pixel-level luminance targeting for Whites/Blacks and spatial convolution for Texture) */}
             {Platform.OS === 'web' && React.createElement(
@@ -781,6 +1118,11 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 {
                   width: imgDisplayWidth,
                   height: imgDisplayHeight,
+                  transform: [
+                    { translateX: panOffset.x },
+                    { translateY: panOffset.y },
+                    { scale: zoomScale }
+                  ]
                 }
               ]}
             >
@@ -794,7 +1136,16 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 >
                   <Image
                     source={{ uri: activeProject.sourceUri }}
-                    style={{ width: imgDisplayWidth, height: imgDisplayHeight }}
+                    style={[
+                      { width: imgDisplayWidth, height: imgDisplayHeight },
+                      {
+                        transform: [
+                          { rotate: `${crop.rotation + crop.straightenAngle}deg` },
+                          { scaleX: crop.flipHorizontal ? -1 : 1 },
+                          { scaleY: crop.flipVertical ? -1 : 1 }
+                        ]
+                      }
+                    ]}
                     resizeMode="cover"
                   />
                   <View style={styles.beforeTag}>
@@ -1289,7 +1640,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 </View>
               )}
             </View>
-          </TouchableOpacity>
+          </View>
         ) : (
           <View style={styles.emptyPreview}>
             <Text style={styles.emptyPreviewText}>Loading Photo...</Text>
