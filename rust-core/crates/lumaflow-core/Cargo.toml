@@ -1,0 +1,17 @@
+[package]
+name = "lumaflow-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lumaflow Team"]
+description = "High-performance radiometric image processing engine for Lumaflow Photo Editor"
+
+[dependencies]
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[lib]
+crate-type = ["rlib"]

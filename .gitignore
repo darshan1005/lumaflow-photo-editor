@@ -1,0 +1,30 @@
+.expo/
+node_modules/
+dist/
+web-build/
+*.log
+*.raw
+
+# Rust build artifacts
+target/
+rust-core/target/
+
+# Android build artifacts
+android/.gradle/
+android/app/build/
+android/build/
+android/app/.cxx/
+android/.idea/
+*.iml
+*.keystore
+!debug.keystore
+
+# iOS build artifacts
+ios/Pods/
+ios/build/
+*.xcworkspace
+*.xcuserdata
+
+# System files
+.DS_Store
+Thumbs.db

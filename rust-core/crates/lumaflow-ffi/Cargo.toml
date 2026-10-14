@@ -1,0 +1,15 @@
+[package]
+name = "lumaflow-ffi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lumaflow Team"]
+description = "C FFI export interface for React Native JSI / TurboModule integration"
+
+[lib]
+name = "lumaflow_ffi"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+lumaflow-core = { path = "../lumaflow-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

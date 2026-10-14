@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Lumaflow Photo Editor",
+    "slug": "lumaflow-photo-editor",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.lumaflow.photoeditor"
+    },
+    "android": {
+      "package": "com.lumaflow.photoeditor",
+      "adaptiveIcon": {
+        "backgroundColor": "#121316"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

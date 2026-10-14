@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lumaflow-core",
+    "crates/lumaflow-ffi",
+]
