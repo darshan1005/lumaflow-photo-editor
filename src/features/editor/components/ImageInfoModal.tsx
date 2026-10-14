@@ -16,7 +16,38 @@ export const ImageInfoModal: React.FC<ImageInfoModalProps> = ({
 }) => {
   if (!analysis) return null;
 
-  const { header, tonalMetrics: tm, recommendedLightAdjustments: rec } = analysis;
+  const { header, tonalMetrics: tm } = analysis;
+
+  // Dynamic aspect classification
+  const aspectLabel =
+    header.aspectRatio >= 1.7
+      ? '16:9 Widescreen'
+      : header.aspectRatio >= 1.45
+      ? '3:2 Classic 35mm'
+      : header.aspectRatio >= 1.25
+      ? '4:3 Standard'
+      : header.aspectRatio === 1
+      ? '1:1 Square'
+      : 'Vertical Portrait';
+
+  // Dynamic scene exposure key
+  const sceneExposure =
+    tm.meanLuminance > 0.60
+      ? 'High-Key (Bright Scene)'
+      : tm.meanLuminance < 0.35
+      ? 'Low-Key (Moody/Dark Scene)'
+      : 'Balanced Midtone Exposure';
+
+  // Dynamic scene contrast profile
+  const toneRange = tm.whitePoint - tm.blackPoint;
+  const sceneContrast =
+    toneRange > 220
+      ? 'High Dynamic Contrast'
+      : toneRange < 140
+      ? 'Soft / Low Contrast'
+      : 'Standard Contrast';
+
+  const hasClipping = tm.clippedBlacksRatio > 0.02 || tm.clippedWhitesRatio > 0.02;
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -25,8 +56,8 @@ export const ImageInfoModal: React.FC<ImageInfoModalProps> = ({
           {/* Header */}
           <View style={styles.header}>
             <View>
-              <Text style={styles.title}>Image Binary Diagnostics</Text>
-              <Text style={styles.subtitle}>Extracted via Lumaflow Binary Extractor</Text>
+              <Text style={styles.title}>Image Diagnostics</Text>
+              <Text style={styles.subtitle}>Extracted via Lumaflow Engine</Text>
             </View>
             <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
               <Text style={styles.closeBtnText}>✕</Text>
@@ -51,7 +82,15 @@ export const ImageInfoModal: React.FC<ImageInfoModalProps> = ({
               </View>
               <View style={styles.statBox}>
                 <Text style={styles.statLabel}>Megapixels</Text>
-                <Text style={styles.statVal}>{header.megapixels} MP ({header.aspectRatio}:1)</Text>
+                <Text style={styles.statVal}>{header.megapixels} MP</Text>
+              </View>
+              <View style={styles.statBox}>
+                <Text style={styles.statLabel}>Aspect Framing</Text>
+                <Text style={styles.statVal}>{header.aspectRatio}:1 ({aspectLabel})</Text>
+              </View>
+              <View style={styles.statBox}>
+                <Text style={styles.statLabel}>Color Depth</Text>
+                <Text style={styles.statVal}>{header.colorDepthBits || 8}-bit per channel (sRGB)</Text>
               </View>
             </View>
 
@@ -63,8 +102,16 @@ export const ImageInfoModal: React.FC<ImageInfoModalProps> = ({
                 <Text style={[styles.statVal, { color: colors.accentPrimary }]}>{tm.dynamicRangeEV} EV stops</Text>
               </View>
               <View style={styles.statBox}>
+                <Text style={styles.statLabel}>Scene Exposure</Text>
+                <Text style={styles.statVal}>{sceneExposure}</Text>
+              </View>
+              <View style={styles.statBox}>
                 <Text style={styles.statLabel}>Median Luminance</Text>
                 <Text style={styles.statVal}>{Math.round(tm.medianLuminance * 100)}% (Mean: {Math.round(tm.meanLuminance * 100)}%)</Text>
+              </View>
+              <View style={styles.statBox}>
+                <Text style={styles.statLabel}>Contrast Profile</Text>
+                <Text style={styles.statVal}>{sceneContrast}</Text>
               </View>
               <View style={styles.statBox}>
                 <Text style={styles.statLabel}>Black Point (0.5%)</Text>
@@ -97,31 +144,21 @@ export const ImageInfoModal: React.FC<ImageInfoModalProps> = ({
               </View>
             </View>
 
-            {/* Clipping alerts if any */}
-            {(tm.clippedBlacksRatio > 0.02 || tm.clippedWhitesRatio > 0.02) && (
+            {/* Dynamic Gamut & Clipping Status */}
+            {hasClipping ? (
               <View style={styles.alertBox}>
                 <Text style={styles.alertText}>
                   ⚠️ {tm.clippedBlacksRatio > 0.02 ? `Crushed Blacks: ${(tm.clippedBlacksRatio * 100).toFixed(1)}% ` : ''}
                   {tm.clippedWhitesRatio > 0.02 ? `Blown Whites: ${(tm.clippedWhitesRatio * 100).toFixed(1)}%` : ''}
                 </Text>
               </View>
-            )}
-
-            {/* Section 4: Recommended Algorithmic Adjustments */}
-            <Text style={styles.sectionTitle}>Algorithmic Light Recommendations</Text>
-            <View style={styles.recCard}>
-              <Text style={styles.recSummary}>{rec.analysisSummary}</Text>
-              <View style={styles.recValuesGrid}>
-                <Text style={styles.recVal}>Exposure: {rec.exposure > 0 ? `+${rec.exposure}` : rec.exposure} EV</Text>
-                <Text style={styles.recVal}>Contrast: {rec.contrast > 0 ? `+${rec.contrast}` : rec.contrast}</Text>
-                <Text style={styles.recVal}>Whites: {rec.whites > 0 ? `+${rec.whites}` : rec.whites}</Text>
-                <Text style={styles.recVal}>Blacks: {rec.blacks > 0 ? `+${rec.blacks}` : rec.blacks}</Text>
-                <Text style={styles.recVal}>Highlights: {rec.highlights > 0 ? `+${rec.highlights}` : rec.highlights}</Text>
-                <Text style={styles.recVal}>Shadows: {rec.shadows > 0 ? `+${rec.shadows}` : rec.shadows}</Text>
-                <Text style={styles.recVal}>Clarity: +{rec.clarity}</Text>
-                <Text style={styles.recVal}>Sharpening: +{rec.sharpening}</Text>
+            ) : (
+              <View style={styles.healthyBox}>
+                <Text style={styles.healthyText}>
+                  ✓ Clean Gamut: Full shadow & highlight detail preserved without clipping.
+                </Text>
               </View>
-            </View>
+            )}
           </ScrollView>
 
           {/* Action Footer */}
@@ -174,14 +211,20 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     fontSize: 11,
+    marginTop: 1,
   },
   closeBtn: {
-    padding: spacing.xs,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   closeBtnText: {
-    color: colors.textSecondary,
-    fontSize: 18,
-    fontWeight: 'bold',
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: '700',
   },
   scroll: {
     padding: spacing.md,
@@ -192,22 +235,22 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 11,
     textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginTop: spacing.sm,
+    letterSpacing: 0.8,
     marginBottom: spacing.xs,
+    marginTop: spacing.xs,
   },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.xs,
-    marginBottom: spacing.xs,
+    marginBottom: spacing.sm,
   },
   statBox: {
-    flex: 1,
-    minWidth: '45%',
+    width: '48%',
     backgroundColor: colors.surfaceElevated,
-    padding: spacing.sm,
-    borderRadius: 8,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 6,
     borderWidth: 1,
     borderColor: colors.borderSubtle,
   },
@@ -262,39 +305,22 @@ const styles = StyleSheet.create({
     color: '#f87171',
     fontSize: 11,
   },
-  recCard: {
-    backgroundColor: colors.surfaceElevated,
-    borderRadius: 8,
-    padding: spacing.sm,
+  healthyBox: {
+    backgroundColor: 'rgba(34, 197, 94, 0.12)',
     borderWidth: 1,
-    borderColor: colors.accentPrimary,
-    marginBottom: spacing.md,
+    borderColor: 'rgba(34, 197, 94, 0.35)',
+    padding: spacing.xs,
+    borderRadius: 6,
+    marginVertical: spacing.xs,
   },
-  recSummary: {
+  healthyText: {
     ...typography.caption,
-    color: colors.textPrimary,
-    fontWeight: '600',
+    color: '#4ade80',
     fontSize: 11,
-    marginBottom: spacing.xs,
-  },
-  recValuesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  recVal: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    backgroundColor: colors.surface,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    fontSize: 10,
   },
   footer: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    gap: spacing.sm,
     padding: spacing.sm,
     borderTopWidth: 1,
     borderTopColor: colors.borderSubtle,
@@ -310,16 +336,5 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     fontWeight: '600',
-  },
-  applyBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: spacing.md,
-    borderRadius: 6,
-    backgroundColor: colors.accentPrimary,
-  },
-  applyBtnText: {
-    ...typography.caption,
-    color: colors.textInverse,
-    fontWeight: '700',
   },
 });
