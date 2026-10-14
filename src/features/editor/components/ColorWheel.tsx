@@ -72,7 +72,12 @@ export const ColorWheel: React.FC = () => {
           min={0}
           max={360}
           unit="°"
-          onChange={v => updateGradingTone(selectedWheel, 'hue', v)}
+          onChange={v => {
+            updateGradingTone(selectedWheel, 'hue', v);
+            if (activeData.saturation === 0 && v > 0) {
+              updateGradingTone(selectedWheel, 'saturation', 35);
+            }
+          }}
           onSlidingStart={beginAdjustment}
           onSlidingComplete={endAdjustment}
           onReset={() => updateGradingTone(selectedWheel, 'hue', 0)}

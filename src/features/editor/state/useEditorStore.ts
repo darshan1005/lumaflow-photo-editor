@@ -14,11 +14,12 @@ import {
   createDefaultColorGrading,
   createDefaultCrop,
   createDefaultHslMixer,
+  createDefaultToneCurves,
   createNewEditDocument
 } from '../models/EditDocument';
-import { HealingSpot, MaskAdjustment } from '../../../types';
+import { CurvePoint, HealingSpot, MaskAdjustment } from '../../../types';
 
-export type EditorTab = 'light' | 'color' | 'grading' | 'mixer' | 'masking' | 'erase' | 'crop' | 'presets';
+export type EditorTab = 'light' | 'color' | 'curves' | 'grading' | 'mixer' | 'masking' | 'erase' | 'crop' | 'presets';
 
 export interface EditorState {
   activeProject: ProjectMetadata | null;
@@ -56,6 +57,9 @@ export interface EditorState {
   ) => void;
   updateGradingParams: (blending: number, balance: number) => void;
   updateHslMixer: (channel: number, key: 'hue' | 'saturation' | 'luminance', value: number) => void;
+  updateCurvePoint: (channel: 'composite' | 'red' | 'green' | 'blue', index: number, point: CurvePoint) => void;
+  updateCurveChannel: (channel: 'composite' | 'red' | 'green' | 'blue', points: CurvePoint[]) => void;
+  resetCurves: (channel?: 'composite' | 'red' | 'green' | 'blue') => void;
   updateCrop: (update: Partial<CropTransform>) => void;
   addHealingSpot: (spot: Omit<HealingSpot, 'id'>) => void;
   removeHealingSpot: (id: string) => void;
@@ -185,6 +189,59 @@ export const useEditorStore = create<EditorState>((set, get) => {
       history.push(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.hslMixer[channel][key] = value;
+      nextDoc.updatedAt = Date.now();
+      set({
+        currentDocument: nextDoc,
+        canUndo: history.canUndo(),
+        canRedo: history.canRedo()
+      });
+    },
+
+    updateCurvePoint: (channel, index, point) => {
+      const { currentDocument } = get();
+      history.push(currentDocument);
+      const nextDoc = cloneEditDocument(currentDocument);
+      if (!nextDoc.curves) nextDoc.curves = createDefaultToneCurves();
+      nextDoc.curves[channel][index] = {
+        x: Math.max(0, Math.min(255, Math.round(point.x))),
+        y: Math.max(0, Math.min(255, Math.round(point.y)))
+      };
+      nextDoc.updatedAt = Date.now();
+      set({
+        currentDocument: nextDoc,
+        canUndo: history.canUndo(),
+        canRedo: history.canRedo()
+      });
+    },
+
+    updateCurveChannel: (channel, points) => {
+      const { currentDocument } = get();
+      history.push(currentDocument);
+      const nextDoc = cloneEditDocument(currentDocument);
+      if (!nextDoc.curves) nextDoc.curves = createDefaultToneCurves();
+      nextDoc.curves[channel] = points.map(pt => ({
+        x: Math.max(0, Math.min(255, Math.round(pt.x))),
+        y: Math.max(0, Math.min(255, Math.round(pt.y)))
+      }));
+      nextDoc.updatedAt = Date.now();
+      set({
+        currentDocument: nextDoc,
+        canUndo: history.canUndo(),
+        canRedo: history.canRedo()
+      });
+    },
+
+    resetCurves: (channel) => {
+      const { currentDocument } = get();
+      history.push(currentDocument);
+      const nextDoc = cloneEditDocument(currentDocument);
+      const defCurves = createDefaultToneCurves();
+      if (channel) {
+        if (!nextDoc.curves) nextDoc.curves = defCurves;
+        else nextDoc.curves[channel] = defCurves[channel];
+      } else {
+        nextDoc.curves = defCurves;
+      }
       nextDoc.updatedAt = Date.now();
       set({
         currentDocument: nextDoc,
@@ -369,6 +426,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         nextDoc.basic.saturation = d.saturation;
       } else if (activeTab === 'grading') {
         nextDoc.colorGrading = createDefaultColorGrading();
+      } else if (activeTab === 'curves') {
+        nextDoc.curves = createDefaultToneCurves();
       } else if (activeTab === 'mixer') {
         nextDoc.hslMixer = createDefaultHslMixer();
       } else if (activeTab === 'crop') {
@@ -394,6 +453,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.basic = createDefaultBasicAdjustments();
       nextDoc.colorGrading = createDefaultColorGrading();
+      nextDoc.curves = createDefaultToneCurves();
       nextDoc.hslMixer = createDefaultHslMixer();
       nextDoc.crop = createDefaultCrop();
       nextDoc.appliedPresetId = undefined;

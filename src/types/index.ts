@@ -102,6 +102,18 @@ export interface MaskAdjustment {
   shadows: number;    // -100 to +100
 }
 
+export interface CurvePoint {
+  x: number; // 0 to 255
+  y: number; // 0 to 255
+}
+
+export interface ToneCurvesAdjustments {
+  composite: CurvePoint[]; // Grey / RGB composite
+  red: CurvePoint[];       // Red channel
+  green: CurvePoint[];     // Green channel
+  blue: CurvePoint[];      // Blue channel
+}
+
 export interface EditDocument {
   version: number;
   id: string;
@@ -115,6 +127,7 @@ export interface EditDocument {
   basic: BasicAdjustments;
   colorGrading: ColorGradingAdjustments;
   hslMixer: HslMixerAdjustments;
+  curves: ToneCurvesAdjustments;
   crop: CropTransform;
 
   // Selective Adjustments & Retouching

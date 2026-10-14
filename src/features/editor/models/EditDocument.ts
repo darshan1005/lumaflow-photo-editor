@@ -2,8 +2,10 @@ import {
   BasicAdjustments,
   ColorGradingAdjustments,
   CropTransform,
+  CurvePoint,
   EditDocument,
-  HslMixerAdjustments
+  HslMixerAdjustments,
+  ToneCurvesAdjustments
 } from '../../../types';
 
 export const CURRENT_DOCUMENT_VERSION = 1;
@@ -51,6 +53,85 @@ export function createDefaultHslMixer(): HslMixerAdjustments {
   ];
 }
 
+export function createDefaultToneCurves(): ToneCurvesAdjustments {
+  return {
+    composite: [
+      { x: 0, y: 0 },
+      { x: 64, y: 64 },
+      { x: 128, y: 128 },
+      { x: 192, y: 192 },
+      { x: 255, y: 255 }
+    ],
+    red: [
+      { x: 0, y: 0 },
+      { x: 64, y: 64 },
+      { x: 128, y: 128 },
+      { x: 192, y: 192 },
+      { x: 255, y: 255 }
+    ],
+    green: [
+      { x: 0, y: 0 },
+      { x: 64, y: 64 },
+      { x: 128, y: 128 },
+      { x: 192, y: 192 },
+      { x: 255, y: 255 }
+    ],
+    blue: [
+      { x: 0, y: 0 },
+      { x: 64, y: 64 },
+      { x: 128, y: 128 },
+      { x: 192, y: 192 },
+      { x: 255, y: 255 }
+    ]
+  };
+}
+
+/**
+ * Computes a 256-entry monotonic lookup table from a set of control points.
+ */
+export function interpolateCurveLut(points: CurvePoint[]): Uint8Array {
+  const lut = new Uint8Array(256);
+  if (!points || points.length === 0) {
+    for (let i = 0; i < 256; i++) lut[i] = i;
+    return lut;
+  }
+
+  // Sort points by X
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+
+  // If only 1 point, flat fill
+  if (sorted.length === 1) {
+    const val = Math.max(0, Math.min(255, Math.round(sorted[0].y)));
+    lut.fill(val);
+    return lut;
+  }
+
+  // Linear / piecewise interpolation between sorted points
+  let ptIdx = 0;
+  for (let x = 0; x < 256; x++) {
+    while (ptIdx < sorted.length - 2 && x > sorted[ptIdx + 1].x) {
+      ptIdx++;
+    }
+
+    const p0 = sorted[ptIdx];
+    const p1 = sorted[ptIdx + 1];
+
+    if (x <= p0.x) {
+      lut[x] = Math.max(0, Math.min(255, Math.round(p0.y)));
+    } else if (x >= p1.x) {
+      lut[x] = Math.max(0, Math.min(255, Math.round(p1.y)));
+    } else {
+      const t = (x - p0.x) / Math.max(1, p1.x - p0.x);
+      // Smooth Hermite interpolation: 3t^2 - 2t^3
+      const smoothT = t * t * (3 - 2 * t);
+      const y = p0.y + (p1.y - p0.y) * smoothT;
+      lut[x] = Math.max(0, Math.min(255, Math.round(y)));
+    }
+  }
+
+  return lut;
+}
+
 export function createDefaultCrop(): CropTransform {
   return {
     x: 0,
@@ -76,6 +157,7 @@ export function createNewEditDocument(assetId: string, sourceUri: string): EditD
     basic: createDefaultBasicAdjustments(),
     colorGrading: createDefaultColorGrading(),
     hslMixer: createDefaultHslMixer(),
+    curves: createDefaultToneCurves(),
     crop: createDefaultCrop(),
     healingSpots: [],
     masks: []
@@ -115,6 +197,9 @@ export function deserializeEditDocument(json: string): EditDocument {
   if (parsed.version < CURRENT_DOCUMENT_VERSION) {
     // Migration hook
     parsed.version = CURRENT_DOCUMENT_VERSION;
+  }
+  if (!parsed.curves) {
+    parsed.curves = createDefaultToneCurves();
   }
   return parsed as EditDocument;
 }

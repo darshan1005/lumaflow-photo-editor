@@ -10,6 +10,7 @@ interface TabItem {
 
 const TABS: TabItem[] = [
   { id: 'light', label: 'Light' },
+  { id: 'curves', label: 'Curves' },
   { id: 'color', label: 'Color' },
   { id: 'grading', label: 'Grading' },
   { id: 'mixer', label: 'Mixer' },

@@ -134,6 +134,45 @@ impl Default for CropTransform {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CurvePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToneCurvesAdjustments {
+    #[serde(default = "default_curve_points")]
+    pub composite: Vec<CurvePoint>,
+    #[serde(default = "default_curve_points")]
+    pub red: Vec<CurvePoint>,
+    #[serde(default = "default_curve_points")]
+    pub green: Vec<CurvePoint>,
+    #[serde(default = "default_curve_points")]
+    pub blue: Vec<CurvePoint>,
+}
+
+pub fn default_curve_points() -> Vec<CurvePoint> {
+    vec![
+        CurvePoint { x: 0.0, y: 0.0 },
+        CurvePoint { x: 64.0, y: 64.0 },
+        CurvePoint { x: 128.0, y: 128.0 },
+        CurvePoint { x: 192.0, y: 192.0 },
+        CurvePoint { x: 255.0, y: 255.0 },
+    ]
+}
+
+impl Default for ToneCurvesAdjustments {
+    fn default() -> Self {
+        Self {
+            composite: default_curve_points(),
+            red: default_curve_points(),
+            green: default_curve_points(),
+            blue: default_curve_points(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditDocument {
     pub version: u32,
@@ -142,6 +181,8 @@ pub struct EditDocument {
     pub basic: BasicAdjustments,
     pub color_grading: ColorGradingAdjustments,
     pub hsl_mixer: HslMixerAdjustments,
+    #[serde(default)]
+    pub curves: Option<ToneCurvesAdjustments>,
     pub crop: CropTransform,
 }
 
@@ -154,6 +195,7 @@ impl Default for EditDocument {
             basic: BasicAdjustments::default(),
             color_grading: ColorGradingAdjustments::default(),
             hsl_mixer: default_hsl_mixer(),
+            curves: Some(ToneCurvesAdjustments::default()),
             crop: CropTransform::default(),
         }
     }

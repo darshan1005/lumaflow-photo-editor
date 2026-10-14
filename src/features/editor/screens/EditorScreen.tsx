@@ -22,10 +22,12 @@ import { AdjustmentPanel } from '../components/AdjustmentPanel';
 import { BeforeAfterViewer } from '../components/BeforeAfterViewer';
 import { ColorWheel } from '../components/ColorWheel';
 import { CropEditor } from '../components/CropEditor';
+import { CurvesEditor } from '../components/CurvesEditor';
 import { EditingToolbar } from '../components/EditingToolbar';
 import { HslMixer } from '../components/HslMixer';
 import { ImageInfoModal } from '../components/ImageInfoModal';
 import { MaskingPanel } from '../components/MaskingPanel';
+import { RealtimeHistogram } from '../components/RealtimeHistogram';
 import { SmartErasePanel } from '../components/SmartErasePanel';
 import {
   ColorGradingTransferTables,
@@ -163,8 +165,8 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   // - Highlights & Shadows: isolated tonal registers (Highlights x > 0.45, Shadows x < 0.55)
   // - 3-Way Color Grading: precise tonal isolation for Shadows (x < 0.45), Midtones (0.25 < x < 0.75), Highlights (x > 0.55), and Global
   const gradingTables = useMemo(() => {
-    return generateColorGradingTables(b.whites, b.blacks, b.highlights, b.shadows, g);
-  }, [b.whites, b.blacks, b.highlights, b.shadows, g]);
+    return generateColorGradingTables(b.whites, b.blacks, b.highlights, b.shadows, g, currentDoc.curves);
+  }, [b.whites, b.blacks, b.highlights, b.shadows, g, currentDoc.curves]);
 
   // 1b. Generate 8-channel HSL Mixer matrix (Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta)
   const hslMixerMatrix = useMemo(() => {
@@ -921,14 +923,19 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                       if (ch.saturation === 0 && ch.luminance === 0 && ch.hue === 0) return null;
                       const CH_HUES = [0, 25, 45, 120, 185, 215, 280, 320];
                       const chHue = (CH_HUES[idx] + ch.hue * 0.4 + 360) % 360;
+                      const hueWeight = (Math.abs(ch.hue) / 100) * 0.30;
+                      const satWeight = (Math.abs(ch.saturation) / 100) * 0.25;
+                      const lumWeight = (Math.abs(ch.luminance) / 100) * 0.15;
+                      const totalOpacity = Math.min(0.42, hueWeight + satWeight + lumWeight);
+                      const baseSat = Math.abs(ch.hue) > 0 && ch.saturation === 0 ? 45 : Math.max(10, 50 + ch.saturation * 0.4);
                       return (
                         <View
                           key={`hsl_ch_${idx}`}
                           style={[
                             StyleSheet.absoluteFill,
                             {
-                              backgroundColor: `hsl(${chHue}, ${Math.max(10, 50 + ch.saturation * 0.4)}%, ${Math.max(10, Math.min(90, 50 + ch.luminance * 0.35))}%)`,
-                              opacity: Math.min(0.35, (Math.abs(ch.saturation) / 100) * 0.25 + (Math.abs(ch.luminance) / 100) * 0.15),
+                              backgroundColor: `hsl(${chHue}, ${baseSat}%, ${Math.max(10, Math.min(90, 50 + ch.luminance * 0.35))}%)`,
+                              opacity: totalOpacity,
                               pointerEvents: 'none' as any
                             }
                           ]}
@@ -1098,6 +1105,11 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
           </View>
         )}
 
+        {/* Floating Real-time Histogram HUD */}
+        <View style={styles.histogramHud}>
+          <RealtimeHistogram document={currentDoc} analysis={imageAnalysis} compact={true} />
+        </View>
+
         {/* Floating Before/After HUD */}
         <View style={styles.floatingHud}>
           <BeforeAfterViewer />
@@ -1123,6 +1135,8 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
           <AdjustmentPanel
             onOpenInfo={() => setShowInfoModal(true)}
           />
+        ) : activeTab === 'curves' ? (
+          <CurvesEditor />
         ) : activeTab === 'grading' ? (
           <ColorWheel />
         ) : activeTab === 'mixer' ? (
@@ -1464,6 +1478,12 @@ const styles = StyleSheet.create({
   emptyPreviewText: {
     ...typography.bodyMedium,
     color: colors.textMuted
+  },
+  histogramHud: {
+    position: 'absolute',
+    top: spacing.md,
+    left: spacing.md,
+    zIndex: 20
   },
   floatingHud: {
     position: 'absolute',

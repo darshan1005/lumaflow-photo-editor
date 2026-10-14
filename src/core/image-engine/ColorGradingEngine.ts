@@ -1,4 +1,5 @@
-import { BasicAdjustments, ColorGradingAdjustments, HslMixerAdjustments } from '../../types';
+import { BasicAdjustments, ColorGradingAdjustments, CurvePoint, HslMixerAdjustments, ToneCurvesAdjustments } from '../../types';
+import { interpolateCurveLut } from '../../features/editor/models/EditDocument';
 
 export interface ColorGradingTransferTables {
   tableR: string;
@@ -49,26 +50,15 @@ export function computeWheelChannelDeltas(
 
 /**
  * Generates independent 33-point transfer tables for R, G, and B.
- * 
- * 1. Base Tone Curve:
- *    - Whites: ONLY modulates high luminance band (x in [0.65, 1.0])
- *    - Blacks: ONLY modulates deep dark luminance band (x in [0.0, 0.35])
- *    - Highlights & Shadows: targets mid-high and mid-low registers
- * 
- * 2. 3-Way Color Grading:
- *    - Shadows: STRICTLY targets dark tones (x < shadowCutoff). Highlights are 100% untouched.
- *    - Highlights: STRICTLY targets bright tones (x > highlightCutoff). Shadows are 100% untouched.
- *    - Midtones: Bell curve targeting middle gray, protecting both deep blacks and specular whites.
- *    - Global: Master grade across all tones.
- *    - Balance: Shifts the crossover midpoint between shadows and highlights.
- *    - Blending: Adjusts the transition overlap width.
+ * Supports Whites/Blacks/Highlights/Shadows, 3-Way Color Grading, and Tone Curves.
  */
 export function generateColorGradingTables(
   whites: number,
   blacks: number,
   highlights: number,
   shadows: number,
-  g?: ColorGradingAdjustments
+  g?: ColorGradingAdjustments,
+  curves?: ToneCurvesAdjustments
 ): ColorGradingTransferTables {
   const steps = 33;
   const valuesR: number[] = [];
@@ -79,6 +69,12 @@ export function generateColorGradingTables(
   const bFactor = blacks / 100;
   const hFactor = highlights / 100;
   const sFactor = shadows / 100;
+
+  // Pre-interpolate curve lookup tables if curves exist
+  const compLut = curves?.composite ? interpolateCurveLut(curves.composite) : null;
+  const rLut = curves?.red ? interpolateCurveLut(curves.red) : null;
+  const gLut = curves?.green ? interpolateCurveLut(curves.green) : null;
+  const bLut = curves?.blue ? interpolateCurveLut(curves.blue) : null;
 
   // Grade wheel channel deltas
   const [sR, sG, sB] = g ? computeWheelChannelDeltas(g.shadows.hue, g.shadows.saturation, g.shadows.luminance) : [0, 0, 0];
@@ -99,6 +95,7 @@ export function generateColorGradingTables(
 
   for (let i = 0; i < steps; i++) {
     const x = i / (steps - 1);
+    const intBin = Math.min(255, Math.max(0, Math.round(x * 255)));
 
     // 1. Blacks: targets ONLY x in [0.0, 0.35]
     let deltaBlack = 0;
@@ -132,22 +129,37 @@ export function generateColorGradingTables(
       deltaShadow = sFactor * 0.18 * wShadow;
     }
 
-    const yBase = Math.max(0, Math.min(1, x + deltaBlack + deltaWhite + deltaHigh + deltaShadow));
+    let yBase = Math.max(0, Math.min(1, x + deltaBlack + deltaWhite + deltaHigh + deltaShadow));
+
+    // 5. Apply Tone Curves (Composite / Grey curve first)
+    if (compLut) {
+      const compBin = Math.min(255, Math.max(0, Math.round(yBase * 255)));
+      yBase = compLut[compBin] / 255.0;
+    }
 
     // Color Grading Tonal Isolation Weights:
-    // Shadows: strictly zero for x >= shadowCutoff (bright highlights stay 100% clean)
-    const wS = x < shadowCutoff ? Math.pow((shadowCutoff - x) / shadowCutoff, 1.6) : 0;
-
-    // Highlights: strictly zero for x <= highlightCutoff (dark shadows stay 100% clean)
-    const wH = x > highlightCutoff ? Math.pow((x - highlightCutoff) / (1.0 - highlightCutoff), 1.6) : 0;
-
-    // Midtones: bell curve peaking at centerPoint, zero at both pure black and pure white
+    const wS = yBase < shadowCutoff ? Math.pow((shadowCutoff - yBase) / shadowCutoff, 1.6) : 0;
+    const wH = yBase > highlightCutoff ? Math.pow((yBase - highlightCutoff) / (1.0 - highlightCutoff), 1.6) : 0;
     const wM = Math.max(0, 1.0 - wS - wH);
 
     // Apply per-channel modulations
-    const yR = Math.max(0, Math.min(1, yBase + wS * sR + wM * mR + wH * hR + globR));
-    const yG = Math.max(0, Math.min(1, yBase + wS * sG + wM * mG + wH * hG + globG));
-    const yB = Math.max(0, Math.min(1, yBase + wS * sB + wM * mB + wH * hB + globB));
+    let yR = Math.max(0, Math.min(1, yBase + wS * sR + wM * mR + wH * hR + globR));
+    let yG = Math.max(0, Math.min(1, yBase + wS * sG + wM * mG + wH * hG + globG));
+    let yB = Math.max(0, Math.min(1, yBase + wS * sB + wM * mB + wH * hB + globB));
+
+    // Apply per-channel Red, Green, Blue Tone Curves
+    if (rLut) {
+      const rBin = Math.min(255, Math.max(0, Math.round(yR * 255)));
+      yR = rLut[rBin] / 255.0;
+    }
+    if (gLut) {
+      const gBin = Math.min(255, Math.max(0, Math.round(yG * 255)));
+      yG = gLut[gBin] / 255.0;
+    }
+    if (bLut) {
+      const bBin = Math.min(255, Math.max(0, Math.round(yB * 255)));
+      yB = bLut[bBin] / 255.0;
+    }
 
     valuesR.push(parseFloat(yR.toFixed(4)));
     valuesG.push(parseFloat(yG.toFixed(4)));
@@ -195,9 +207,11 @@ export function computeHslMixerCoefficients(m?: HslMixerAdjustments): HslMixerCo
     const s = red.saturation / 100;
     const l = red.luminance / 100;
     if (h > 0) {
-      g_r += h * 0.45; // Shift red toward orange/yellow (add green to red channel)
+      g_r += h * 0.45; // Shift red toward orange/yellow
+      r_r -= h * 0.20;
     } else if (h < 0) {
-      b_r += (-h) * 0.45; // Shift red toward magenta (add blue to red channel)
+      b_r += (-h) * 0.45; // Shift red toward magenta
+      r_r -= (-h) * 0.20;
     }
     r_r += s * 0.40;
     r_const += l * 0.15;
@@ -212,8 +226,10 @@ export function computeHslMixerCoefficients(m?: HslMixerAdjustments): HslMixerCo
     if (h > 0) {
       g_r += h * 0.35; // Shift orange toward yellow
       g_g += h * 0.15;
+      r_r -= h * 0.15;
     } else if (h < 0) {
       r_g += (-h) * 0.35; // Shift orange toward deep red
+      g_g -= (-h) * 0.15;
     }
     r_r += s * 0.25;
     g_g += s * 0.20;

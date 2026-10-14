@@ -37,6 +37,53 @@ pub struct PreparedPipelineContext {
     pub has_vibrance: bool,
     pub saturation: f32,
     pub has_saturation: bool,
+    // Tone Curves Lookup Tables
+    pub curve_lut_r: [u8; 256],
+    pub curve_lut_g: [u8; 256],
+    pub curve_lut_b: [u8; 256],
+    pub has_curves: bool,
+}
+
+pub fn interpolate_curve_points(points: &[crate::models::CurvePoint]) -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    if points.is_empty() {
+        for i in 0..256 {
+            lut[i] = i as u8;
+        }
+        return lut;
+    }
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+    if sorted.len() == 1 {
+        let val = sorted[0].y.round().clamp(0.0, 255.0) as u8;
+        lut.fill(val);
+        return lut;
+    }
+
+    let mut pt_idx = 0;
+    for x in 0..256 {
+        let x_f = x as f32;
+        while pt_idx < sorted.len() - 2 && x_f > sorted[pt_idx + 1].x {
+            pt_idx += 1;
+        }
+        let p0 = &sorted[pt_idx];
+        let p1 = &sorted[pt_idx + 1];
+
+        if x_f <= p0.x {
+            lut[x] = p0.y.round().clamp(0.0, 255.0) as u8;
+        } else if x_f >= p1.x {
+            lut[x] = p1.y.round().clamp(0.0, 255.0) as u8;
+        } else {
+            let span = (p1.x - p0.x).max(1.0);
+            let t = (x_f - p0.x) / span;
+            let smooth_t = t * t * (3.0 - 2.0 * t);
+            let y = p0.y + (p1.y - p0.y) * smooth_t;
+            lut[x] = y.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    lut
 }
 
 impl PreparedPipelineContext {
@@ -126,9 +173,38 @@ impl PreparedPipelineContext {
         let mut mixer_sat_factors = [0.0f32; 8];
         let mut mixer_luma_factors = [0.0f32; 8];
         for ch in 0..8 {
-            mixer_hue_factors[ch] = (m[ch].hue / 100.0) * 0.12;
+            mixer_hue_factors[ch] = (m[ch].hue / 100.0) * 0.22;
             mixer_sat_factors[ch] = m[ch].saturation / 100.0;
             mixer_luma_factors[ch] = (m[ch].luminance / 100.0) * 0.3;
+        }
+
+        // 7. Tone Curves Lookup Tables
+        let mut curve_lut_r = [0u8; 256];
+        let mut curve_lut_g = [0u8; 256];
+        let mut curve_lut_b = [0u8; 256];
+        let mut has_curves = false;
+
+        if let Some(c) = &doc.curves {
+            let comp_lut = interpolate_curve_points(&c.composite);
+            let r_lut = interpolate_curve_points(&c.red);
+            let g_lut = interpolate_curve_points(&c.green);
+            let b_lut = interpolate_curve_points(&c.blue);
+
+            for i in 0..256 {
+                let comp_val = comp_lut[i] as usize;
+                curve_lut_r[i] = r_lut[comp_val];
+                curve_lut_g[i] = g_lut[comp_val];
+                curve_lut_b[i] = b_lut[comp_val];
+                if curve_lut_r[i] != i as u8 || curve_lut_g[i] != i as u8 || curve_lut_b[i] != i as u8 {
+                    has_curves = true;
+                }
+            }
+        } else {
+            for i in 0..256 {
+                curve_lut_r[i] = i as u8;
+                curve_lut_g[i] = i as u8;
+                curve_lut_b[i] = i as u8;
+            }
         }
 
         Self {
@@ -159,6 +235,10 @@ impl PreparedPipelineContext {
             has_vibrance: b.vibrance.abs() > 0.001,
             saturation: b.saturation,
             has_saturation: b.saturation.abs() > 0.001,
+            curve_lut_r,
+            curve_lut_g,
+            curve_lut_b,
+            has_curves,
         }
     }
 
@@ -273,10 +353,17 @@ impl PreparedPipelineContext {
             out_b = final_luma + (out_b - final_luma) * sat_mult;
         }
 
-        (
-            (out_r.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (out_g.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (out_b.clamp(0.0, 1.0) * 255.0).round() as u8,
-        )
+        // Step 8: Tone Curves Lookup Table
+        let mut r_byte = (out_r.clamp(0.0, 1.0) * 255.0).round() as usize;
+        let mut g_byte = (out_g.clamp(0.0, 1.0) * 255.0).round() as usize;
+        let mut b_byte = (out_b.clamp(0.0, 1.0) * 255.0).round() as usize;
+
+        if self.has_curves {
+            r_byte = self.curve_lut_r[r_byte.min(255)] as usize;
+            g_byte = self.curve_lut_g[g_byte.min(255)] as usize;
+            b_byte = self.curve_lut_b[b_byte.min(255)] as usize;
+        }
+
+        (r_byte as u8, g_byte as u8, b_byte as u8)
     }
 }
