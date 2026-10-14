@@ -1,12 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import {
   Platform,
   StyleSheet,
-  Text,
-  TouchableOpacity,
   View
 } from 'react-native';
-import { colors, spacing, typography } from '../../../theme/colors';
 import { EditDocument } from '../../../types';
 import { CompleteImageAnalysis } from '../../../core/image-engine/ImageBinaryExtractor';
 import { interpolateCurveLut } from '../models/EditDocument';
@@ -22,9 +19,6 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
   analysis,
   compact = false
 }) => {
-  const [isExpanded, setIsExpanded] = useState(!compact);
-  const [showClipping, setShowClipping] = useState(false);
-
   // Baseline natural distribution
   const baseHistograms = useMemo(() => {
     if (analysis?.histograms) {
@@ -108,25 +102,21 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
       if (outRed[i] > peak) peak = outRed[i];
       if (outGreen[i] > peak) peak = outGreen[i];
       if (outBlue[i] > peak) peak = outBlue[i];
+      if (outLuma[i] > peak) peak = outLuma[i];
     }
-
-    const shadowClipped = (outRed[0] + outGreen[0] + outBlue[0]) > (peak * 0.35);
-    const highlightClipped = (outRed[255] + outGreen[255] + outBlue[255]) > (peak * 0.35);
 
     return {
       red: outRed,
       green: outGreen,
       blue: outBlue,
       luma: outLuma,
-      peak,
-      shadowClipped,
-      highlightClipped
+      peak
     };
-  }, [baseHistograms, doc]);
+  }, [doc.basic, doc.curves, baseHistograms]);
 
-  const graphWidth = isExpanded ? 240 : 160;
-  const graphHeight = isExpanded ? 72 : 44;
-  const numSteps = 56;
+  const graphWidth = compact ? 150 : 180;
+  const graphHeight = compact ? 56 : 64;
+  const numSteps = 48;
 
   // Build color-wise sliced paths (Grey core + Yellow, Cyan, Magenta, Red, Green, Blue fringes)
   const paths = useMemo(() => {
@@ -171,8 +161,10 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
       greyPts.push({ x, y: yGrey });
     }
 
-    const toD = (pts: Array<{ x: number; y: number }>) => pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
-    const toFillD = (pts: Array<{ x: number; y: number }>) => `${toD(pts)} L ${graphWidth} ${graphHeight} L 0 ${graphHeight} Z`;
+    const toD = (pts: Array<{ x: number; y: number }>) =>
+      pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+    const toFillD = (pts: Array<{ x: number; y: number }>) =>
+      `${toD(pts)} L ${graphWidth} ${graphHeight} L 0 ${graphHeight} Z`;
 
     return {
       rStroke: toD(rPts),
@@ -186,56 +178,17 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
   }, [liveData, graphWidth, graphHeight]);
 
   return (
-    <View style={[styles.container, isExpanded ? styles.containerExpanded : styles.containerCompact]}>
-      {/* Header bar: "Histogram ▼" */}
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <Text style={styles.headerTitle}>Histogram</Text>
-          <TouchableOpacity onPress={() => setIsExpanded(!isExpanded)}>
-            <Text style={styles.dropdownArrow}>{isExpanded ? '▼' : '▶'}</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Main Histogram Box */}
+    <View style={styles.container}>
+      {/* Pure Histogram Graph Box */}
       <View style={[styles.graphBox, { width: graphWidth, height: graphHeight }]}>
-        {/* Shadow Clipping Warning Box (Top Left) */}
-        <TouchableOpacity
-          style={[
-            styles.clippingBox,
-            styles.clipLeft,
-            liveData.shadowClipped && styles.clipActiveShadow
-          ]}
-          onPress={() => setShowClipping(!showClipping)}
-        >
-          <Text style={[styles.clipTriangle, liveData.shadowClipped && styles.clipTextShadow]}>
-            ▲
-          </Text>
-        </TouchableOpacity>
-
-        {/* Highlight Clipping Warning Box (Top Right) */}
-        <TouchableOpacity
-          style={[
-            styles.clippingBox,
-            styles.clipRight,
-            liveData.highlightClipped && styles.clipActiveHighlight
-          ]}
-          onPress={() => setShowClipping(!showClipping)}
-        >
-          <Text style={[styles.clipTriangle, liveData.highlightClipped && styles.clipTextHighlight]}>
-            ▲
-          </Text>
-        </TouchableOpacity>
-
-        {/* Vertical Tonal Zone Lines (Blacks, Shadows, Mids, Highlights, Whites) */}
+        {/* Subtle Vertical Tonal Zone Lines (Shadows, Mids, Highlights) */}
         <View style={styles.zoneGrid}>
-          <View style={[styles.zoneLine, { left: '20%' }]} />
-          <View style={[styles.zoneLine, { left: '40%' }]} />
-          <View style={[styles.zoneLine, { left: '60%' }]} />
-          <View style={[styles.zoneLine, { left: '80%' }]} />
+          <View style={[styles.zoneLine, { left: '25%' }]} />
+          <View style={[styles.zoneLine, { left: '50%' }]} />
+          <View style={[styles.zoneLine, { left: '75%' }]} />
         </View>
 
-        {/* Color-wise SVG Histogram with Additive Blending (matches Lightroom reference) */}
+        {/* Color-wise Additive SVG Histogram */}
         {Platform.OS === 'web' ? (
           React.createElement(
             'svg',
@@ -244,7 +197,7 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
               height: graphHeight,
               style: { position: 'absolute', top: 0, left: 0 }
             },
-            // Group with additive screen blending for true Red + Green = Yellow, Green + Blue = Cyan!
+            // Group with additive screen blending for true Red + Green = Yellow, Green + Blue = Cyan
             React.createElement(
               'g',
               { style: { mixBlendMode: 'screen' } },
@@ -264,13 +217,13 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
                 opacity: 0.85
               })
             ),
-            // Solid Grey / Light White overlapping core (matches center of reference image)
+            // Solid Grey overlapping core
             React.createElement('path', {
               d: paths.greyFill,
               fill: 'rgb(188, 192, 198)',
               opacity: 0.95
             }),
-            // Subtle crisp boundary strokes
+            // Subtle boundary strokes
             React.createElement('path', {
               d: paths.rStroke,
               fill: 'none',
@@ -304,14 +257,13 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
               const maxVal = Math.max(r, g, b);
               const h = Math.min(graphHeight - 4, Math.max(2, (maxVal / liveData.peak) * (graphHeight - 4)));
 
-              // Determine color based on dominant channels
-              let barColor = '#c0c0c0'; // Grey core
-              if (r > g * 1.3 && r > b * 1.3) barColor = '#ef4444'; // Red
-              else if (g > r * 1.3 && g > b * 1.3) barColor = '#22c55e'; // Green
-              else if (b > r * 1.3 && b > g * 1.3) barColor = '#3b82f6'; // Blue
-              else if (r > b * 1.2 && g > b * 1.2) barColor = '#eab308'; // Yellow
-              else if (g > r * 1.2 && b > r * 1.2) barColor = '#06b6d4'; // Cyan
-              else if (r > g * 1.2 && b > g * 1.2) barColor = '#ec4899'; // Magenta
+              let barColor = '#c0c0c0';
+              if (r > g * 1.3 && r > b * 1.3) barColor = '#ef4444';
+              else if (g > r * 1.3 && g > b * 1.3) barColor = '#22c55e';
+              else if (b > r * 1.3 && b > g * 1.3) barColor = '#3b82f6';
+              else if (r > b * 1.2 && g > b * 1.2) barColor = '#eab308';
+              else if (g > r * 1.2 && b > r * 1.2) barColor = '#06b6d4';
+              else if (r > g * 1.2 && b > g * 1.2) barColor = '#ec4899';
 
               return (
                 <View
@@ -326,111 +278,33 @@ export const RealtimeHistogram: React.FC<RealtimeHistogramProps> = ({
           </View>
         )}
       </View>
-
-      {/* Bottom Camera EXIF Metadata Bar (matches reference image: ISO 100  50 mm  f / 2.0  1/1000 sec) */}
-      {isExpanded && (
-        <View style={styles.metadataBar}>
-          <Text style={styles.metaText}>ISO 100</Text>
-          <Text style={styles.metaText}>50 mm</Text>
-          <Text style={styles.metaText}>f / 2.0</Text>
-          <Text style={styles.metaText}>1/1000 sec</Text>
-        </View>
-      )}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#262629',
+    backgroundColor: 'rgba(26, 26, 30, 0.92)',
     borderRadius: 6,
-    padding: 6,
+    padding: 3,
     borderWidth: 1,
-    borderColor: '#3a3a3e',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.5,
     shadowRadius: 8,
     elevation: 8
   },
-  containerCompact: {
-    padding: 4
-  },
-  containerExpanded: {
-    padding: 6
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    marginBottom: 4,
-    paddingHorizontal: 2
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4
-  },
-  headerTitle: {
-    ...typography.caption,
-    color: '#9ca3af',
-    fontSize: 11,
-    fontWeight: '600'
-  },
-  dropdownArrow: {
-    color: '#9ca3af',
-    fontSize: 8,
-    marginTop: 1
-  },
   graphBox: {
-    backgroundColor: '#1b1b1e',
-    borderRadius: 3,
-    borderWidth: 1.5,
-    borderColor: '#424248',
+    backgroundColor: '#151518',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
     overflow: 'hidden',
     position: 'relative'
   },
-  clippingBox: {
-    position: 'absolute',
-    top: 3,
-    width: 14,
-    height: 14,
-    backgroundColor: '#111113',
-    borderRadius: 2,
-    borderWidth: 1,
-    borderColor: '#2e2e33',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 10
-  },
-  clipLeft: {
-    left: 3
-  },
-  clipRight: {
-    right: 3
-  },
-  clipActiveShadow: {
-    borderColor: '#3b82f6',
-    backgroundColor: '#1e3a8a'
-  },
-  clipActiveHighlight: {
-    borderColor: '#ef4444',
-    backgroundColor: '#7f1d1d'
-  },
-  clipTriangle: {
-    fontSize: 7,
-    color: '#4b5563',
-    fontWeight: '900',
-    lineHeight: 8
-  },
-  clipTextShadow: {
-    color: '#60a5fa'
-  },
-  clipTextHighlight: {
-    color: '#f87171'
-  },
   zoneGrid: {
-    ...StyleSheet.absoluteFillObject,
+    ...(StyleSheet.absoluteFill as any),
     pointerEvents: 'none'
   },
   zoneLine: {
@@ -438,7 +312,7 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
     width: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.06)'
+    backgroundColor: 'rgba(255, 255, 255, 0.08)'
   },
   mobileBarsRow: {
     flexDirection: 'row',
@@ -449,18 +323,5 @@ const styles = StyleSheet.create({
   mobileBar: {
     width: 2.2,
     borderRadius: 1
-  },
-  metadataBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.xs,
-    paddingTop: 5,
-    paddingBottom: 1
-  },
-  metaText: {
-    ...typography.caption,
-    color: '#8b8e96',
-    fontSize: 9,
-    fontWeight: '500'
   }
 });

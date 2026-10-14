@@ -177,26 +177,66 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   // Micro-contrast acutance directly reveals fine surface textures (fabric, stone, skin pores, hair, foliage)
   const kernelK = (b.clarity / 100) * 0.70 + (b.sharpening / 100) * 0.35;
 
-  // 3. Base exposure & contrast
-  const exposureBright = Math.max(0.1, Math.min(3.0, 1.0 + b.exposure * 0.45));
-  const baseContrast = Math.max(0.1, Math.min(3.0, 1.0 + b.contrast / 100));
+  // Curves modulation factors computed directly from currentDoc.curves
+  const curvesMod = useMemo(() => {
+    const c = currentDoc.curves;
+    if (!c) {
+      return { contrastMod: 1.0, exposureMod: 1.0, liftMod: 0, tintR: 0, tintG: 0, tintB: 0 };
+    }
+    const comp = c.composite || [];
+    let contrastMod = 1.0;
+    let exposureMod = 1.0;
+    let liftMod = 0;
+
+    if (comp.length >= 5) {
+      // Contrast slope from Shadows (pt 1) and Highs (pt 3)
+      const dy = comp[3].y - comp[1].y;
+      const dx = comp[3].x - comp[1].x;
+      if (dx > 0) {
+        contrastMod = Math.max(0.2, Math.min(2.5, dy / dx));
+      }
+      // Exposure shift from Mids (pt 2)
+      const midsDiff = comp[2].y - 128;
+      exposureMod = Math.max(0.2, Math.min(2.5, 1.0 + (midsDiff / 128) * 0.7));
+      // Lifted shadows from Blacks (pt 0)
+      liftMod = Math.max(0, Math.min(1.0, comp[0].y / 255));
+    }
+
+    // Color channel tints from R, G, B curves
+    const rPts = c.red || [];
+    const gPts = c.green || [];
+    const bPts = c.blue || [];
+
+    const tintR = rPts.length >= 3 ? (rPts[2].y - 128) / 128 : 0;
+    const tintG = gPts.length >= 3 ? (gPts[2].y - 128) / 128 : 0;
+    const tintB = bPts.length >= 3 ? (bPts[2].y - 128) / 128 : 0;
+
+    return { contrastMod, exposureMod, liftMod, tintR, tintG, tintB };
+  }, [currentDoc.curves]);
+
+  // 3. Base exposure & contrast with live curve modulation
+  const exposureBright = Math.max(0.1, Math.min(3.0, (1.0 + b.exposure * 0.45) * curvesMod.exposureMod));
+  const baseContrast = Math.max(0.1, Math.min(3.0, (1.0 + b.contrast / 100) * curvesMod.contrastMod));
 
   // Saturation & Vibrance (with subtle clarity texture vibrance)
   const saturation = Math.max(0, Math.min(3.0,
     1.0 + (b.saturation + b.vibrance * 0.55 + b.clarity * 0.10) / 100
   ));
 
-  const sepia = Math.max(0, b.temperature / 250);
-  const hueRotate = `${(b.tint / 100) * 25}deg`;
+  const sepia = Math.max(0, b.temperature / 250 + (curvesMod.tintR > 0 ? curvesMod.tintR * 0.3 : 0));
+  const hueRotate = `${(b.tint / 100) * 25 + (curvesMod.tintG * 20 - curvesMod.tintB * 20)}deg`;
 
   // Sharpening drop-shadow on Web for crisp edge enhancement
   const sharpeningFilter = b.sharpening > 0
     ? ` drop-shadow(0 0 0.5px rgba(0,0,0,${((b.sharpening / 100) * 0.65).toFixed(2)}))`
     : '';
 
+  // Dynamic tone filter ID so Web browsers (Chromium/WebKit) immediately invalidate the raster cache on curve/grade updates
+  const toneFilterId = `luma-tone-filter-${currentDoc.updatedAt || 0}`;
+
   // Web filter string incorporating SVG tone filter and spatial convolution
   const webFilterString = Platform.OS === 'web'
-    ? `url(#luma-tone-filter) brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`
+    ? `url(#${toneFilterId}) brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`
     : `brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`;
 
   const webFilterStyle: any = isHoldingOriginal
@@ -588,7 +628,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 null,
                 React.createElement(
                   'filter',
-                  { id: 'luma-tone-filter', colorInterpolationFilters: 'sRGB' },
+                  { id: toneFilterId, key: toneFilterId, colorInterpolationFilters: 'sRGB' },
                   Math.abs(kernelK) > 0.02
                     ? React.createElement('feConvolveMatrix', {
                         order: '3',
@@ -796,6 +836,34 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                     style={[
                       StyleSheet.absoluteFill,
                       { backgroundColor: tintOverlayColor, pointerEvents: 'none' as any }
+                    ]}
+                  />
+                )}
+
+                {/* Lifted Shadows (Matte Film) Overlay */}
+                {!isHoldingOriginal && curvesMod.liftMod > 0.02 && (
+                  <View
+                    style={[
+                      StyleSheet.absoluteFill,
+                      {
+                        backgroundColor: '#ffffff',
+                        opacity: Math.min(0.28, curvesMod.liftMod * 0.35),
+                        pointerEvents: 'none' as any
+                      }
+                    ]}
+                  />
+                )}
+
+                {/* Blue / Warm Curve Channel Tint Layer */}
+                {!isHoldingOriginal && (Math.abs(curvesMod.tintB) > 0.05 || Math.abs(curvesMod.tintR) > 0.05) && (
+                  <View
+                    style={[
+                      StyleSheet.absoluteFill,
+                      {
+                        backgroundColor: curvesMod.tintB > curvesMod.tintR ? '#3b82f6' : '#ef4444',
+                        opacity: Math.min(0.25, Math.max(Math.abs(curvesMod.tintB), Math.abs(curvesMod.tintR)) * 0.25),
+                        pointerEvents: 'none' as any
+                      }
                     ]}
                   />
                 )}
@@ -1171,10 +1239,10 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
             })}
           </ScrollView>
         ) : null}
-
-        {/* Horizontal Category Toolbar */}
-        <EditingToolbar />
       </View>
+
+      {/* Horizontal Category Toolbar */}
+      <EditingToolbar />
 
       {/* Export Dialog */}
       <ExportDialog
@@ -1525,10 +1593,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
   bottomDrawer: {
-    minHeight: 270,
+    height: 270,
     backgroundColor: colors.surfaceCard,
     borderTopWidth: 1,
-    borderTopColor: colors.borderSubtle
+    borderTopColor: colors.borderSubtle,
+    overflow: 'hidden'
   },
   presetScroll: {
     paddingVertical: spacing.md

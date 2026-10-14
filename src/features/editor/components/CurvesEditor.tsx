@@ -11,7 +11,6 @@ import {
 import { colors, spacing, typography } from '../../../theme/colors';
 import { CurvePoint } from '../../../types';
 import { useEditorStore } from '../state/useEditorStore';
-import { AdjustmentSlider } from './AdjustmentSlider';
 
 type CurveChannel = 'composite' | 'red' | 'green' | 'blue';
 
@@ -46,10 +45,10 @@ const BASIC_CURVES_PRESETS = [
   {
     id: 'lifted',
     name: 'Lifted shadows',
-    description: 'Lifts black point for cinematic matte film',
+    description: 'Lifts black point for cinematic matte film look',
     points: [
       { x: 0, y: 52 },
-      { x: 70, y: 82 },
+      { x: 64, y: 82 },
       { x: 128, y: 128 },
       { x: 192, y: 192 },
       { x: 255, y: 255 }
@@ -82,7 +81,7 @@ const BASIC_CURVES_PRESETS = [
   {
     id: 'linear',
     name: 'Linear (Default)',
-    description: 'Flat identity diagonal line',
+    description: 'Neutral 1:1 diagonal line reset',
     points: [
       { x: 0, y: 0 },
       { x: 64, y: 64 },
@@ -92,6 +91,8 @@ const BASIC_CURVES_PRESETS = [
     ]
   }
 ];
+
+const POINT_NAMES = ['Blacks', 'Shadows', 'Mids', 'Highs', 'Whites'];
 
 export const CurvesEditor: React.FC = () => {
   const [activeChannel, setActiveChannel] = useState<CurveChannel>('composite');
@@ -119,55 +120,156 @@ export const CurvesEditor: React.FC = () => {
 
   const activeConfig = CHANNELS.find(c => c.id === activeChannel) || CHANNELS[0];
 
-  const graphSize = 200;
+  const graphSize = 160;
   const graphBoxRef = useRef<View>(null);
   const graphPageRef = useRef({ x: 0, y: 0 });
 
-  // PanResponder to drag control points directly on the 2D graph
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        beginAdjustment();
-        if (graphBoxRef.current) {
-          graphBoxRef.current.measureInWindow((x, y) => {
-            graphPageRef.current = { x, y };
-          });
-        }
-        const touchX = evt.nativeEvent.locationX;
-        const normX = Math.max(0, Math.min(255, (touchX / graphSize) * 255));
+  // Latest refs to prevent stale closures
+  const activePointsRef = useRef(activePoints);
+  activePointsRef.current = activePoints;
 
-        // Find nearest control point
-        let nearestIdx = 0;
-        let minDiff = 999;
-        activePoints.forEach((pt, idx) => {
-          const diff = Math.abs(pt.x - normX);
-          if (diff < minDiff) {
-            minDiff = diff;
-            nearestIdx = idx;
-          }
-        });
-        setSelectedPointIdx(nearestIdx);
+  const activeChannelRef = useRef(activeChannel);
+  activeChannelRef.current = activeChannel;
 
-        // Update Y on touch
-        const touchY = evt.nativeEvent.locationY;
-        const newY = Math.max(0, Math.min(255, 255 - (touchY / graphSize) * 255));
-        updateCurvePoint(activeChannel, nearestIdx, { x: activePoints[nearestIdx].x, y: newY });
-      },
-      onPanResponderMove: (evt) => {
-        const touchY = evt.nativeEvent.locationY;
-        const newY = Math.max(0, Math.min(255, 255 - (touchY / graphSize) * 255));
-        updateCurvePoint(activeChannel, selectedPointIdx, {
-          x: activePoints[selectedPointIdx].x,
-          y: newY
-        });
-      },
-      onPanResponderRelease: () => {
-        endAdjustment();
+  const isDraggingRef = useRef(false);
+  const draggingPointIdxRef = useRef<number | null>(null);
+
+  // Web Pointer Events: Accurate bounding box tracking
+  const handleWebPointerDown = (e: any) => {
+    if (Platform.OS !== 'web') return;
+    const domNode = e.currentTarget as HTMLElement;
+    const rect = domNode.getBoundingClientRect();
+    const clientX = e.clientX;
+    const clientY = e.clientY;
+    const localX = Math.max(0, Math.min(graphSize, clientX - rect.left));
+    const localY = Math.max(0, Math.min(graphSize, clientY - rect.top));
+
+    // Find nearest point
+    const pts = activePointsRef.current;
+    let nearestIdx = 0;
+    let minDiff = Infinity;
+    pts.forEach((p, idx) => {
+      const px = (p.x / 255) * graphSize;
+      const py = graphSize - (p.y / 255) * graphSize;
+      const dist = Math.hypot(localX - px, localY - py);
+      if (dist < minDiff) {
+        minDiff = dist;
+        nearestIdx = idx;
       }
-    })
-  ).current;
+    });
+
+    isDraggingRef.current = true;
+    draggingPointIdxRef.current = nearestIdx;
+    setSelectedPointIdx(nearestIdx);
+
+    try {
+      domNode.setPointerCapture?.(e.pointerId);
+    } catch {}
+
+    beginAdjustment();
+
+    const normY = Math.max(0, Math.min(255, Math.round((1 - localY / graphSize) * 255)));
+    updateCurvePoint(activeChannelRef.current, nearestIdx, {
+      x: pts[nearestIdx].x,
+      y: normY
+    });
+  };
+
+  const handleWebPointerMove = (e: any) => {
+    if (Platform.OS !== 'web' || !isDraggingRef.current || draggingPointIdxRef.current === null) return;
+    const domNode = e.currentTarget as HTMLElement;
+    const rect = domNode.getBoundingClientRect();
+    const clientY = e.clientY;
+    const localY = Math.max(0, Math.min(graphSize, clientY - rect.top));
+    const normY = Math.max(0, Math.min(255, Math.round((1 - localY / graphSize) * 255)));
+
+    const idx = draggingPointIdxRef.current;
+    const pts = activePointsRef.current;
+    if (idx >= 0 && idx < pts.length) {
+      updateCurvePoint(activeChannelRef.current, idx, {
+        x: pts[idx].x,
+        y: normY
+      });
+    }
+  };
+
+  const handleWebPointerUp = (e: any) => {
+    if (Platform.OS !== 'web') return;
+    if (isDraggingRef.current) {
+      isDraggingRef.current = false;
+      draggingPointIdxRef.current = null;
+      endAdjustment();
+      try {
+        const domNode = e.currentTarget as HTMLElement;
+        domNode.releasePointerCapture?.(e.pointerId);
+      } catch {}
+    }
+  };
+
+  // Native Mobile PanResponder
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (evt, gestureState) => {
+          beginAdjustment();
+          isDraggingRef.current = true;
+          if (graphBoxRef.current) {
+            graphBoxRef.current.measureInWindow((x, y) => {
+              graphPageRef.current = { x, y };
+            });
+          }
+          const pageX = evt.nativeEvent.pageX ?? gestureState.x0;
+          const pageY = evt.nativeEvent.pageY ?? gestureState.y0;
+          const localX = Math.max(0, Math.min(graphSize, pageX - graphPageRef.current.x));
+          const localY = Math.max(0, Math.min(graphSize, pageY - graphPageRef.current.y));
+
+          const pts = activePointsRef.current;
+          let nearestIdx = 0;
+          let minDiff = Infinity;
+          pts.forEach((p, idx) => {
+            const px = (p.x / 255) * graphSize;
+            const py = graphSize - (p.y / 255) * graphSize;
+            const dist = Math.hypot(localX - px, localY - py);
+            if (dist < minDiff) {
+              minDiff = dist;
+              nearestIdx = idx;
+            }
+          });
+
+          draggingPointIdxRef.current = nearestIdx;
+          setSelectedPointIdx(nearestIdx);
+
+          const normY = Math.max(0, Math.min(255, Math.round((1 - localY / graphSize) * 255)));
+          updateCurvePoint(activeChannelRef.current, nearestIdx, {
+            x: pts[nearestIdx].x,
+            y: normY
+          });
+        },
+        onPanResponderMove: (evt, gestureState) => {
+          if (!isDraggingRef.current || draggingPointIdxRef.current === null) return;
+          const pageY = evt.nativeEvent.pageY ?? gestureState.moveY;
+          const localY = Math.max(0, Math.min(graphSize, pageY - graphPageRef.current.y));
+          const normY = Math.max(0, Math.min(255, Math.round((1 - localY / graphSize) * 255)));
+
+          const idx = draggingPointIdxRef.current;
+          const pts = activePointsRef.current;
+          if (idx >= 0 && idx < pts.length) {
+            updateCurvePoint(activeChannelRef.current, idx, {
+              x: pts[idx].x,
+              y: normY
+            });
+          }
+        },
+        onPanResponderRelease: () => {
+          isDraggingRef.current = false;
+          draggingPointIdxRef.current = null;
+          endAdjustment();
+        }
+      }),
+    [beginAdjustment, endAdjustment, updateCurvePoint, graphSize]
+  );
 
   // Build SVG smooth spline path through the points
   const curvePathD = useMemo(() => {
@@ -197,32 +299,16 @@ export const CurvesEditor: React.FC = () => {
     };
   }, [activePoints, graphSize]);
 
-  const POINT_NAMES = ['Blacks', 'Shadows', 'Mids', 'Highs', 'Whites'];
-
-  // Helper to generate a miniature preview path for each preset card
-  const getPresetSvgPath = (points: CurvePoint[], size: number) => {
-    const pts = points.map(p => ({
-      x: (p.x / 255) * size,
-      y: size - (p.y / 255) * size
-    }));
-    let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-    for (let i = 0; i < pts.length - 1; i++) {
-      const p0 = pts[Math.max(0, i - 1)];
-      const p1 = pts[i];
-      const p2 = pts[i + 1];
-      const p3 = pts[Math.min(pts.length - 1, i + 2)];
-      const cp1x = p1.x + (p2.x - p0.x) / 6;
-      const cp1y = p1.y + (p2.y - p0.y) / 6;
-      const cp2x = p2.x - (p3.x - p1.x) / 6;
-      const cp2y = p2.y - (p3.y - p1.y) / 6;
-      d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
-    }
-    return d;
+  // Apply a preset directly to the active channel
+  const handleApplyPreset = (presetPoints: CurvePoint[]) => {
+    beginAdjustment();
+    updateCurveChannel(activeChannel, presetPoints);
+    endAdjustment();
   };
 
   return (
     <View style={styles.container}>
-      {/* Channel Switcher (Grey, Red, Green, Blue) */}
+      {/* Top Channel Switcher Bar */}
       <View style={styles.channelRow}>
         <View style={styles.channelGroup}>
           {CHANNELS.map(ch => {
@@ -232,7 +318,7 @@ export const CurvesEditor: React.FC = () => {
                 key={ch.id}
                 style={[
                   styles.channelPill,
-                  isActive && { borderColor: ch.color, backgroundColor: 'rgba(255, 255, 255, 0.10)' }
+                  isActive && { borderColor: ch.color, backgroundColor: 'rgba(255, 255, 255, 0.12)' }
                 ]}
                 onPress={() => setActiveChannel(ch.id)}
               >
@@ -253,22 +339,33 @@ export const CurvesEditor: React.FC = () => {
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={true}
+        showsVerticalScrollIndicator={false}
       >
-        {/* Main Graph Box with Exact 4x4 Grid (as shown in reference image) */}
+        {/* Main 4x4 Grid Graph & HUD */}
         <View style={styles.graphContainer}>
           <View
             ref={graphBoxRef}
-            style={[styles.graphBox, { width: graphSize, height: graphSize }]}
-            {...panResponder.panHandlers}
+            style={[
+              styles.graphBox,
+              { width: graphSize, height: graphSize },
+              Platform.OS === 'web' && ({ touchAction: 'none', userSelect: 'none', cursor: 'crosshair' } as any)
+            ]}
+            {...(Platform.OS === 'web'
+              ? {
+                  onPointerDown: handleWebPointerDown,
+                  onPointerMove: handleWebPointerMove,
+                  onPointerUp: handleWebPointerUp,
+                  onPointerCancel: handleWebPointerUp
+                } as any
+              : panResponder.panHandlers)}
           >
             {/* 4x4 Grid Lines (3 horizontal, 3 vertical) */}
-            <View style={[styles.gridH, { top: '25%' }]} />
-            <View style={[styles.gridH, { top: '50%' }]} />
-            <View style={[styles.gridH, { top: '75%' }]} />
-            <View style={[styles.gridV, { left: '25%' }]} />
-            <View style={[styles.gridV, { left: '50%' }]} />
-            <View style={[styles.gridV, { left: '75%' }]} />
+            <View style={[styles.gridH, { top: '25%' }]} pointerEvents="none" />
+            <View style={[styles.gridH, { top: '50%' }]} pointerEvents="none" />
+            <View style={[styles.gridH, { top: '75%' }]} pointerEvents="none" />
+            <View style={[styles.gridV, { left: '25%' }]} pointerEvents="none" />
+            <View style={[styles.gridV, { left: '50%' }]} pointerEvents="none" />
+            <View style={[styles.gridV, { left: '75%' }]} pointerEvents="none" />
 
             {/* SVG Diagonal line & Smooth Tone Curve */}
             {Platform.OS === 'web' && React.createElement(
@@ -302,7 +399,7 @@ export const CurvesEditor: React.FC = () => {
               })
             )}
 
-            {/* Control Point Dots (as in reference image) */}
+            {/* Control Point Dots with selection halo */}
             {activePoints.map((pt, idx) => {
               const cx = (pt.x / 255) * graphSize;
               const cy = graphSize - (pt.y / 255) * graphSize;
@@ -311,16 +408,33 @@ export const CurvesEditor: React.FC = () => {
                 <View
                   key={`pt_${idx}`}
                   style={[
-                    styles.pointDot,
+                    styles.pointHitArea,
                     {
-                      left: cx - 6,
-                      top: cy - 6,
-                      borderColor: activeConfig.color,
-                      backgroundColor: isSelected ? activeConfig.color : '#ffffff',
-                      transform: [{ scale: isSelected ? 1.3 : 1 }]
+                      left: cx - 12,
+                      top: cy - 12
                     }
                   ]}
-                />
+                  pointerEvents="none"
+                >
+                  <View
+                    style={[
+                      styles.pointDot,
+                      {
+                        borderColor: activeConfig.color,
+                        backgroundColor: isSelected ? activeConfig.color : '#ffffff',
+                        transform: [{ scale: isSelected ? 1.3 : 1 }]
+                      }
+                    ]}
+                  />
+                  {isSelected && (
+                    <View
+                      style={[
+                        styles.pointRing,
+                        { borderColor: activeConfig.color }
+                      ]}
+                    />
+                  )}
+                </View>
               );
             })}
           </View>
@@ -328,145 +442,35 @@ export const CurvesEditor: React.FC = () => {
           {/* Coordinate Readout HUD */}
           <View style={styles.readoutBox}>
             <Text style={styles.readoutTitle}>
-              {POINT_NAMES[selectedPointIdx].toUpperCase()} POINT
+              {POINT_NAMES[selectedPointIdx]?.toUpperCase() || 'POINT'} ADJUSTMENT
             </Text>
             <Text style={[styles.readoutValues, { color: activeConfig.color }]}>
               In: {Math.round(activePoints[selectedPointIdx]?.x || 0)}  •  Out: {Math.round(activePoints[selectedPointIdx]?.y || 0)}
             </Text>
             <Text style={styles.readoutHint}>
-              Drag the dots on the 4×4 grid or tap any curve preset below
+              Drag dot vertically on 4×4 grid or tap a preset below
             </Text>
           </View>
         </View>
 
-        {/* Basic Curves Presets Header (matching image title) */}
+        {/* Basic Curves Presets: Each preset is a SINGLE clickable button */}
         <Text style={styles.sectionTitle}>BASIC CURVES PRESETS</Text>
 
-        {/* 4-Card Preset Gallery (matching the 4 boxes in user reference) */}
-        <View style={styles.presetGrid}>
-          {BASIC_CURVES_PRESETS.slice(0, 4).map(preset => {
-            const miniSize = 68;
-            const pathD = getPresetSvgPath(preset.points, miniSize);
-            return (
-              <TouchableOpacity
-                key={preset.id}
-                style={styles.presetCard}
-                onPress={() => {
-                  beginAdjustment();
-                  updateCurveChannel(activeChannel, preset.points);
-                  endAdjustment();
-                }}
-              >
-                <Text style={styles.presetCardLabel}>{preset.name}</Text>
-                <View style={[styles.miniGraph, { width: miniSize, height: miniSize }]}>
-                  {/* 4x4 mini grid */}
-                  <View style={[styles.miniGridH, { top: '25%' }]} />
-                  <View style={[styles.miniGridH, { top: '50%' }]} />
-                  <View style={[styles.miniGridH, { top: '75%' }]} />
-                  <View style={[styles.miniGridV, { left: '25%' }]} />
-                  <View style={[styles.miniGridV, { left: '50%' }]} />
-                  <View style={[styles.miniGridV, { left: '75%' }]} />
-
-                  {Platform.OS === 'web' && React.createElement(
-                    'svg',
-                    {
-                      width: miniSize,
-                      height: miniSize,
-                      style: { position: 'absolute', top: 0, left: 0 }
-                    },
-                    React.createElement('line', {
-                      x1: 0,
-                      y1: miniSize,
-                      x2: miniSize,
-                      y2: 0,
-                      stroke: 'rgba(255, 255, 255, 0.12)',
-                      strokeWidth: '1'
-                    }),
-                    React.createElement('path', {
-                      d: pathD,
-                      fill: 'none',
-                      stroke: activeConfig.color,
-                      strokeWidth: '1.8'
-                    })
-                  )}
-
-                  {/* Dot handles */}
-                  {preset.points.map((pt, pIdx) => (
-                    <View
-                      key={`mini_pt_${pIdx}`}
-                      style={[
-                        styles.miniDot,
-                        {
-                          left: (pt.x / 255) * miniSize - 2,
-                          top: miniSize - (pt.y / 255) * miniSize - 2,
-                          backgroundColor: activeConfig.color
-                        }
-                      ]}
-                    />
-                  ))}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
+        <View style={styles.presetButtonsContainer}>
+          {BASIC_CURVES_PRESETS.map(preset => (
+            <TouchableOpacity
+              key={preset.id}
+              style={styles.singlePresetButton}
+              activeOpacity={0.7}
+              onPress={() => handleApplyPreset(preset.points)}
+            >
+              <Text style={styles.singlePresetTitle}>{preset.name}</Text>
+              <Text style={styles.singlePresetDesc}>{preset.description}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
 
-        {/* Precision Numeric Tonal Sliders */}
-        <Text style={styles.sectionTitle}>PRECISION TONAL SLIDERS</Text>
-
-        <AdjustmentSlider
-          label="Blacks (Deep Dark Point)"
-          value={activePoints[0].y}
-          min={0}
-          max={100}
-          onChange={v => updateCurvePoint(activeChannel, 0, { x: 0, y: v })}
-          onSlidingStart={beginAdjustment}
-          onSlidingComplete={endAdjustment}
-          onReset={() => updateCurvePoint(activeChannel, 0, { x: 0, y: 0 })}
-        />
-
-        <AdjustmentSlider
-          label="Shadows (Zone 64)"
-          value={activePoints[1].y}
-          min={0}
-          max={255}
-          onChange={v => updateCurvePoint(activeChannel, 1, { x: 64, y: v })}
-          onSlidingStart={beginAdjustment}
-          onSlidingComplete={endAdjustment}
-          onReset={() => updateCurvePoint(activeChannel, 1, { x: 64, y: 64 })}
-        />
-
-        <AdjustmentSlider
-          label="Mids (Center 128)"
-          value={activePoints[2].y}
-          min={0}
-          max={255}
-          onChange={v => updateCurvePoint(activeChannel, 2, { x: 128, y: v })}
-          onSlidingStart={beginAdjustment}
-          onSlidingComplete={endAdjustment}
-          onReset={() => updateCurvePoint(activeChannel, 2, { x: 128, y: 128 })}
-        />
-
-        <AdjustmentSlider
-          label="Highs (Zone 192)"
-          value={activePoints[3].y}
-          min={0}
-          max={255}
-          onChange={v => updateCurvePoint(activeChannel, 3, { x: 192, y: v })}
-          onSlidingStart={beginAdjustment}
-          onSlidingComplete={endAdjustment}
-          onReset={() => updateCurvePoint(activeChannel, 3, { x: 192, y: 192 })}
-        />
-
-        <AdjustmentSlider
-          label="Whites (Specular Peak 255)"
-          value={activePoints[4].y}
-          min={150}
-          max={255}
-          onChange={v => updateCurvePoint(activeChannel, 4, { x: 255, y: v })}
-          onSlidingStart={beginAdjustment}
-          onSlidingComplete={endAdjustment}
-          onReset={() => updateCurvePoint(activeChannel, 4, { x: 255, y: 255 })}
-        />
+        <View style={{ height: 16 }} />
       </ScrollView>
     </View>
   );
@@ -474,75 +478,74 @@ export const CurvesEditor: React.FC = () => {
 
 const styles = StyleSheet.create({
   container: {
-    height: 330,
-    backgroundColor: colors.surface
+    height: 270,
+    backgroundColor: '#161619',
+    paddingTop: 4
   },
   channelRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: spacing.md,
-    paddingVertical: 6,
+    paddingVertical: 4,
     borderBottomWidth: 1,
-    borderBottomColor: colors.borderSubtle,
-    backgroundColor: colors.surfaceElevated
+    borderBottomColor: 'rgba(255, 255, 255, 0.08)'
   },
   channelGroup: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs
+    gap: 6
   },
   channelPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: spacing.sm,
+    gap: 5,
+    paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: 'transparent',
-    gap: 4
+    backgroundColor: 'rgba(255, 255, 255, 0.05)'
   },
   channelDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4
+    width: 6,
+    height: 6,
+    borderRadius: 3
   },
   channelLabel: {
-    ...typography.labelSmall,
-    color: colors.textMuted,
+    ...typography.caption,
+    color: '#9ca3af',
     fontSize: 11
   },
   resetBtn: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)'
   },
   resetBtnText: {
     ...typography.caption,
-    color: colors.textMuted,
-    fontSize: 11
+    color: '#9ca3af',
+    fontSize: 10
   },
   scroll: {
     flex: 1
   },
   scrollContent: {
-    paddingVertical: spacing.sm,
-    paddingBottom: spacing.xxl
+    paddingHorizontal: spacing.md,
+    paddingTop: 6,
+    paddingBottom: spacing.md
   },
   graphContainer: {
-    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.md,
-    gap: spacing.md,
-    marginBottom: spacing.sm
+    marginBottom: spacing.xs
   },
   graphBox: {
-    backgroundColor: '#0a0a0c',
-    borderRadius: 4,
+    backgroundColor: '#0a0a0d',
+    borderRadius: 6,
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.25)',
-    overflow: 'hidden',
-    position: 'relative'
+    borderColor: '#374151',
+    position: 'relative',
+    overflow: 'hidden'
   },
   gridH: {
     position: 'absolute',
@@ -558,100 +561,80 @@ const styles = StyleSheet.create({
     width: 1,
     backgroundColor: 'rgba(255, 255, 255, 0.16)'
   },
-  pointDot: {
+  pointHitArea: {
     position: 'absolute',
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 2,
-    zIndex: 10
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  pointDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    borderWidth: 1.5
+  },
+  pointRing: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    opacity: 0.6
   },
   readoutBox: {
-    flex: 1,
-    justifyContent: 'center'
+    marginTop: 4,
+    alignItems: 'center'
   },
   readoutTitle: {
     ...typography.caption,
-    color: colors.textPrimary,
+    color: '#9ca3af',
+    fontSize: 9,
     fontWeight: '700',
-    fontSize: 11,
-    letterSpacing: 0.5
+    letterSpacing: 0.8
   },
   readoutValues: {
-    ...typography.caption,
+    ...typography.bodyMedium,
+    fontSize: 11,
     fontWeight: '700',
-    fontSize: 13,
-    marginTop: 2
+    marginTop: 1
   },
   readoutHint: {
     ...typography.caption,
-    color: colors.textMuted,
+    color: '#6b7280',
     fontSize: 9,
-    marginTop: 4,
-    lineHeight: 13
+    marginTop: 1
   },
   sectionTitle: {
     ...typography.caption,
-    color: colors.textMuted,
+    color: '#9ca3af',
+    fontSize: 10,
     fontWeight: '700',
-    fontSize: 10,
     letterSpacing: 0.8,
-    paddingHorizontal: spacing.md,
-    marginTop: spacing.sm,
-    marginBottom: spacing.xs,
-    textTransform: 'uppercase'
+    marginTop: spacing.xs,
+    marginBottom: 6
   },
-  presetGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    gap: spacing.xs,
-    marginBottom: spacing.sm
+  presetButtonsContainer: {
+    gap: 6
   },
-  presetCard: {
-    width: '48%',
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+  singlePresetButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
     borderRadius: 6,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 7,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    padding: spacing.xs,
-    alignItems: 'center',
-    gap: 4
+    borderColor: 'rgba(255, 255, 255, 0.08)'
   },
-  presetCardLabel: {
+  singlePresetTitle: {
+    ...typography.bodyMedium,
+    color: '#f3f4f6',
+    fontSize: 12,
+    fontWeight: '600'
+  },
+  singlePresetDesc: {
     ...typography.caption,
-    color: colors.textSecondary,
-    fontSize: 10,
-    fontWeight: '600',
-    textAlign: 'center'
-  },
-  miniGraph: {
-    backgroundColor: '#0a0a0c',
-    borderRadius: 3,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.18)',
-    position: 'relative',
-    overflow: 'hidden'
-  },
-  miniGridH: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)'
-  },
-  miniGridV: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)'
-  },
-  miniDot: {
-    position: 'absolute',
-    width: 4,
-    height: 4,
-    borderRadius: 2
+    color: '#9ca3af',
+    fontSize: 9,
+    marginTop: 1
   }
 });
