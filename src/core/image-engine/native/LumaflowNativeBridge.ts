@@ -24,7 +24,7 @@ interface ILumaflowGlobalJSI {
     doc: EditDocument
   ): boolean;
   computeHistogram(rgbaBuffer: ArrayBuffer): ArrayBuffer;
-  calculateTiles(width: number, height: number, tileSize?: number): TileBounds[];
+  calculateTiles?(width: number, height: number, tileSize?: number): TileBounds[];
 }
 
 declare global {
@@ -112,7 +112,7 @@ export function processRgbaBufferNative(
   }
 
   try {
-    return global.__lumaflow.processBuffer(input.buffer, output.buffer, width, height, doc);
+    return global.__lumaflow.processBuffer(input.buffer as ArrayBuffer, output.buffer as ArrayBuffer, width, height, doc);
   } catch (err) {
     console.error('[LumaflowNativeBridge] Native processBuffer failed:', err);
     return false;
@@ -128,7 +128,7 @@ export function computeHistogramNative(pixels: Uint8ClampedArray): NativeHistogr
   }
 
   try {
-    const rawBuffer = global.__lumaflow.computeHistogram(pixels.buffer);
+    const rawBuffer = global.__lumaflow.computeHistogram(pixels.buffer as ArrayBuffer);
     const u32Array = new Uint32Array(rawBuffer);
 
     return {

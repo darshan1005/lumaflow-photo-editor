@@ -4,10 +4,32 @@ import { colors, spacing, typography } from '../../../theme/colors';
 import { useEditorStore } from '../state/useEditorStore';
 import { AdjustmentSlider } from './AdjustmentSlider';
 
-export const SmartErasePanel: React.FC = () => {
-  const [brushSize, setBrushSize] = useState<number>(30);
-  const [feather, setFeather] = useState<number>(50);
-  const [mode, setMode] = useState<'heal' | 'clone'>('heal');
+export interface SmartEraseSettings {
+  brushSize: number;
+  feather: number;
+  mode: 'heal' | 'clone';
+}
+
+interface SmartErasePanelProps {
+  settings?: SmartEraseSettings;
+  onSettingsChange?: (settings: SmartEraseSettings) => void;
+}
+
+const DEFAULT_SETTINGS: SmartEraseSettings = {
+  brushSize: 30,
+  feather: 50,
+  mode: 'heal'
+};
+
+export const SmartErasePanel: React.FC<SmartErasePanelProps> = ({ settings, onSettingsChange }) => {
+  const [localSettings, setLocalSettings] = useState<SmartEraseSettings>(DEFAULT_SETTINGS);
+  const activeSettings = settings || localSettings;
+
+  const updateSettings = (update: Partial<SmartEraseSettings>) => {
+    const nextSettings = { ...activeSettings, ...update };
+    if (!settings) setLocalSettings(nextSettings);
+    onSettingsChange?.(nextSettings);
+  };
 
   const healingSpots = useEditorStore(state => state.currentDocument.healingSpots || []);
   const removeHealingSpot = useEditorStore(state => state.removeHealingSpot);
@@ -21,7 +43,7 @@ export const SmartErasePanel: React.FC = () => {
         <View style={styles.bannerContent}>
           <Text style={styles.bannerTitle}>Smart Erase / Healing Tool</Text>
           <Text style={styles.bannerText}>
-            How to use: Tap directly on any blemish, wire, person, or unwanted object in the photo above. A red circle will appear marking the spot. The tool will analyze surrounding pixels and fill the area with matching texture.
+            How to use: Tap or drag directly over any blemish, wire, person, or unwanted object in the photo above. Red circles show each healing dab; the tool analyzes surrounding pixels and fills the area with matching texture.
           </Text>
         </View>
       </View>
@@ -47,21 +69,21 @@ export const SmartErasePanel: React.FC = () => {
       {/* Mode Selector */}
       <View style={styles.modeRow}>
         <TouchableOpacity
-          style={[styles.modeBtn, mode === 'heal' && styles.modeBtnActive]}
-          onPress={() => setMode('heal')}
+          style={[styles.modeBtn, activeSettings.mode === 'heal' && styles.modeBtnActive]}
+          onPress={() => updateSettings({ mode: 'heal' })}
         >
           <Text style={styles.modeBtnIcon}>🩹</Text>
-          <Text style={[styles.modeText, mode === 'heal' && styles.modeTextActive]}>
+          <Text style={[styles.modeText, activeSettings.mode === 'heal' && styles.modeTextActive]}>
             Heal (Content-Aware)
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.modeBtn, mode === 'clone' && styles.modeBtnActive]}
-          onPress={() => setMode('clone')}
+          style={[styles.modeBtn, activeSettings.mode === 'clone' && styles.modeBtnActive]}
+          onPress={() => updateSettings({ mode: 'clone' })}
         >
           <Text style={styles.modeBtnIcon}>📋</Text>
-          <Text style={[styles.modeText, mode === 'clone' && styles.modeTextActive]}>
+          <Text style={[styles.modeText, activeSettings.mode === 'clone' && styles.modeTextActive]}>
             Clone (Exact Texture)
           </Text>
         </TouchableOpacity>
@@ -69,23 +91,23 @@ export const SmartErasePanel: React.FC = () => {
 
       {/* Brush Size & Feather Sliders */}
       <AdjustmentSlider
-        label="Brush Size"
-        value={brushSize}
+          label="Brush Size"
+          value={activeSettings.brushSize}
         min={5}
         max={100}
         unit="px"
-        onChange={setBrushSize}
-        onReset={() => setBrushSize(30)}
+          onChange={value => updateSettings({ brushSize: value })}
+          onReset={() => updateSettings({ brushSize: DEFAULT_SETTINGS.brushSize })}
       />
 
       <AdjustmentSlider
-        label="Feather / Softness"
-        value={feather}
+          label="Feather / Softness"
+          value={activeSettings.feather}
         min={0}
         max={100}
         unit="%"
-        onChange={setFeather}
-        onReset={() => setFeather(50)}
+          onChange={value => updateSettings({ feather: value })}
+          onReset={() => updateSettings({ feather: DEFAULT_SETTINGS.feather })}
       />
 
       {/* Spot History & Clear Action */}

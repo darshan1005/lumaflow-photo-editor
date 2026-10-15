@@ -45,7 +45,11 @@ export const MaskingPanel: React.FC = () => {
       radiusX: 0.35,
       radiusY: 0.35,
       points: [],
-    });
+      // Runtime brush parameters are optional document extensions consumed by
+      // the CPU renderer; keeping them here avoids changing the shared model.
+      brushRadius: type === 'brush' ? 0.04 : undefined,
+      feather: type === 'brush' ? 50 : undefined,
+    } as any);
   };
 
   return (
@@ -115,7 +119,7 @@ export const MaskingPanel: React.FC = () => {
             <View style={styles.infoBox}>
               <Text style={styles.infoIcon}>🖌️</Text>
               <Text style={styles.infoText}>
-                Brush mask paints selectively on the photo. Tap or drag on the image to paint the mask area. Adjust exposure, contrast, and color below to modify only the painted region.
+                Brush mask paints selectively on the photo. Tap or drag on the image to paint the mask area ({activeMask.points?.length || 0} points). Adjust exposure, contrast, and color below to modify only the painted region.
               </Text>
             </View>
           )}

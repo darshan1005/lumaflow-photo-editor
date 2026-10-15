@@ -112,5 +112,69 @@ export const BUILT_IN_PRESETS: Preset[] = [
         sharpening: 40
       }
     }
+  },
+  {
+    id: 'preset_clean_portrait',
+    name: 'Clean Portrait',
+    category: 'built-in',
+    createdAt: 1700000000000,
+    documentState: {
+      basic: {
+        exposure: 0.08,
+        contrast: -6,
+        highlights: -18,
+        shadows: 18,
+        whites: 4,
+        blacks: -3,
+        temperature: 4,
+        tint: 2,
+        vibrance: 12,
+        saturation: -4,
+        clarity: -8,
+        vignette: -8,
+        grain: 0,
+        sharpening: 18
+      },
+      colorGrading: {
+        shadows: { hue: 215, saturation: 8, luminance: 2 },
+        midtones: { hue: 28, saturation: 10, luminance: 3 },
+        highlights: { hue: 38, saturation: 8, luminance: 4 },
+        global: { hue: 30, saturation: 3, luminance: 0 },
+        blending: 60,
+        balance: 0
+      }
+    }
+  },
+  {
+    id: 'preset_cool_urban_cinema',
+    name: 'Cool Urban Cinema',
+    category: 'built-in',
+    createdAt: 1700000000000,
+    documentState: {
+      basic: {
+        exposure: -0.05,
+        contrast: 24,
+        highlights: -16,
+        shadows: 8,
+        whites: 6,
+        blacks: -18,
+        temperature: -18,
+        tint: 5,
+        vibrance: 16,
+        saturation: -6,
+        clarity: 18,
+        vignette: 18,
+        grain: 12,
+        sharpening: 28
+      },
+      colorGrading: {
+        shadows: { hue: 205, saturation: 28, luminance: -5 },
+        midtones: { hue: 190, saturation: 10, luminance: 0 },
+        highlights: { hue: 42, saturation: 18, luminance: 3 },
+        global: { hue: 205, saturation: 4, luminance: 0 },
+        blending: 58,
+        balance: 18
+      }
+    }
   }
 ];

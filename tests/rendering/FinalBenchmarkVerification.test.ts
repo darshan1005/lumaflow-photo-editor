@@ -18,7 +18,7 @@ describe('Phase 6: Final Benchmark Verification & Performance Evaluation', () =>
   });
 
   test('Benchmark 1: 1080p Interactive Preview Latency & Frame Rate Targets', async () => {
-    await rustEngine.loadImage('file://bench_1080p.jpg', 1920);
+    await rustEngine.loadImage('file://bench_1080p.jpg');
     const doc = createNewEditDocument('test_1080p', 'file://bench_1080p.jpg');
     doc.basic.exposure = 0.75;
     doc.basic.temperature = 25;

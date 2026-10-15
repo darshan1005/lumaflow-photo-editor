@@ -8,6 +8,7 @@ module.exports = {
       tsconfig: {
         module: 'commonjs',
         target: 'es2020',
+        jsx: 'react-jsx',
         esModuleInterop: true
       }
     }]

@@ -264,8 +264,11 @@ export class RustNativeEngine implements IModularImageEngine, IImageEngine {
   ): Promise<BenchmarkReport> {
     const dummyDoc: EditDocument = {
       version: 1,
+      id: 'bench_doc',
       assetId: 'bench_asset',
       sourceUri: 'file://bench.jpg',
+      createdAt: 0,
+      updatedAt: 0,
       basic: {
         exposure: 0.5,
         contrast: 20,
@@ -300,6 +303,12 @@ export class RustNativeEngine implements IModularImageEngine, IImageEngine {
         { hue: 0, saturation: 0, luminance: 0 },
         { hue: 0, saturation: 0, luminance: 0 }
       ],
+      curves: {
+        composite: [],
+        red: [],
+        green: [],
+        blue: []
+      },
       crop: {
         x: 0,
         y: 0,
@@ -309,7 +318,9 @@ export class RustNativeEngine implements IModularImageEngine, IImageEngine {
         flipHorizontal: false,
         flipVertical: false,
         straightenAngle: 0
-      }
+      },
+      healingSpots: [],
+      masks: []
     };
 
     await this.previewRenderer.initialize();

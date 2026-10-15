@@ -50,6 +50,7 @@ export const HslMixer: React.FC = () => {
       </View>
 
       <Text style={styles.channelName}>{channelInfo.name.toUpperCase()} CHANNEL ADJUSTMENT</Text>
+      <Text style={styles.processingHint}>Selective per-channel HSL · preview and export</Text>
 
       <ScrollView
         style={styles.scroll}
@@ -134,6 +135,13 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.5,
+  },
+  processingHint: {
+    ...typography.caption,
+    color: colors.accentSecondary,
+    textAlign: 'center',
+    fontSize: 10,
+    marginBottom: spacing.xs,
   },
   scroll: {
     flex: 1,

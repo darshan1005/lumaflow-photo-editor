@@ -13,7 +13,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, spacing, typography } from '../../../theme/colors';
 import { FILM_GRAIN_URI, VIGNETTE_BLACK_URI, VIGNETTE_WHITE_URI } from '../../../theme/textures';
-import { ColorGradingAdjustments, ExportOptions } from '../../../types';
+import { ExportOptions } from '../../../types';
 import { ExportDialog } from '../../export/screens/ExportDialog';
 import { BUILT_IN_PRESETS } from '../presets/builtInPresets';
 import { useEditorStore } from '../state/useEditorStore';
@@ -21,21 +21,27 @@ import { CompleteImageAnalysis, ImageBinaryExtractor } from '../../../core/image
 import { AdjustmentPanel } from '../components/AdjustmentPanel';
 import { BeforeAfterViewer } from '../components/BeforeAfterViewer';
 import { ColorWheel } from '../components/ColorWheel';
-import { CropEditor } from '../components/CropEditor';
+import {
+  clampCropBounds,
+  CropBounds,
+  CropAspectMode,
+  CropEditor,
+  CropInteractionHandle,
+  getCropInteractionHandle,
+  getNormalizedCropAspectRatio,
+  getOrientedSourceDimensions,
+  moveCropBounds,
+  resizeCropBounds
+} from '../components/CropEditor';
 import { CurvesEditor } from '../components/CurvesEditor';
 import { EditingToolbar } from '../components/EditingToolbar';
 import { HslMixer } from '../components/HslMixer';
 import { ImageInfoModal } from '../components/ImageInfoModal';
 import { MaskingPanel } from '../components/MaskingPanel';
 import { RealtimeHistogram } from '../components/RealtimeHistogram';
-import { SmartErasePanel } from '../components/SmartErasePanel';
-import {
-  ColorGradingTransferTables,
-  computeHslMixerCoefficients,
-  generateColorGradingTables,
-  generateHslMixerMatrix
-} from '../../../core/image-engine/ColorGradingEngine';
+import { SmartErasePanel, SmartEraseSettings } from '../components/SmartErasePanel';
 import { getActiveImageEngine } from '../../../core/image-engine/EngineFactory';
+import { renderDocument } from '../../../core/image-engine/renderDocument';
 
 interface EditorScreenProps {
   onBack: () => void;
@@ -45,6 +51,19 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(360);
   const [viewportHeight, setViewportHeight] = useState(360);
+  const [eraseSettings, setEraseSettings] = useState<SmartEraseSettings>({
+    brushSize: 30,
+    feather: 50,
+    mode: 'heal'
+  });
+  const [processedPreview, setProcessedPreview] = useState<{
+    uri: string;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [cropAspectMode, setCropAspectMode] = useState<CropAspectMode>('original');
+  const previewImageSourceRef = useRef<string | null>(null);
+  const previewImagePromiseRef = useRef<Promise<any> | null>(null);
 
   // Zoom & Pan state
   const [zoomScale, setZoomScale] = useState(1);
@@ -72,6 +91,11 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   const dragStartPosRef = useRef({ x: 0, y: 0 });
   const hasMovedSignificantlyRef = useRef(false);
   const longPressTimerRef = useRef<any>(null);
+  const isPaintingToolRef = useRef(false);
+  const lastToolPointRef = useRef<{ x: number; y: number } | null>(null);
+  const activeMaskRef = useRef<any>(null);
+  const eraseSettingsRef = useRef<SmartEraseSettings>(eraseSettings);
+  const selectedHealingSpotRef = useRef<string | null>(null);
 
   const activeProject = useEditorStore(state => state.activeProject);
   const currentDoc = useEditorStore(state => state.currentDocument);
@@ -83,16 +107,75 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   const setSplitPosition = useEditorStore(state => state.setSplitPosition);
   const isHoldingOriginal = useEditorStore(state => state.isHoldingOriginal);
   const setHoldingOriginal = useEditorStore(state => state.setHoldingOriginal);
+  const activeMaskId = useEditorStore(state => state.activeMaskId);
+  const cropAspectModeRef = useRef<CropAspectMode>('original');
+  const cropBoundsRef = useRef<CropBounds>(currentDoc.crop);
+  const cropRotationRef = useRef(0);
+  const cropInteractionRef = useRef<{
+    handle: CropInteractionHandle;
+    startX: number;
+    startY: number;
+    frameWidth: number;
+    frameHeight: number;
+    bounds: CropBounds;
+    pointerId?: number;
+  } | null>(null);
+  const cropOverlaySizeRef = useRef({ width: 360, height: 360 });
 
   const undo = useEditorStore(state => state.undo);
   const redo = useEditorStore(state => state.redo);
   const resetModule = useEditorStore(state => state.resetActiveModule);
   const applyPreset = useEditorStore(state => state.applyPreset);
+  const beginAdjustment = useEditorStore(state => state.beginAdjustment);
+  const endAdjustment = useEditorStore(state => state.endAdjustment);
   const addHealingSpot = useEditorStore(state => state.addHealingSpot);
   const removeHealingSpot = useEditorStore(state => state.removeHealingSpot);
+  const updateMask = useEditorStore(state => state.updateMask);
+  const updateCrop = useEditorStore(state => state.updateCrop);
 
   const [imageAnalysis, setImageAnalysis] = useState<CompleteImageAnalysis | null>(null);
   const [showInfoModal, setShowInfoModal] = useState(false);
+  const [selectedHealingSpotId, setSelectedHealingSpotId] = useState<string | null>(null);
+
+  const activeMask = (currentDoc.masks || []).find(mask => mask.id === activeMaskId) || currentDoc.masks?.[0] || null;
+  activeMaskRef.current = activeMask;
+  eraseSettingsRef.current = eraseSettings;
+  activeTabRef.current = activeTab;
+  zoomScaleRef.current = zoomScale;
+  panOffsetRef.current = panOffset;
+  cropAspectModeRef.current = cropAspectMode;
+  cropBoundsRef.current = currentDoc.crop;
+  cropRotationRef.current = currentDoc.crop.rotation;
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+    activeMaskRef.current = activeMask;
+    eraseSettingsRef.current = eraseSettings;
+    if (activeTab !== 'erase' && activeTab !== 'masking') {
+      setSelectedHealingSpotId(null);
+    }
+  }, [activeMask, activeTab, eraseSettings]);
+
+  const previousActiveTabRef = useRef(activeTab);
+  useEffect(() => {
+    const enteredOrExitedCrop = previousActiveTabRef.current !== activeTab && (
+      previousActiveTabRef.current === 'crop' || activeTab === 'crop'
+    );
+    if (enteredOrExitedCrop) {
+      setZoomScale(1);
+      setPanOffset({ x: 0, y: 0 });
+      // Do not show the previous asynchronous bitmap while the crop frame is
+      // opening or being committed. The fallback image canvas immediately
+      // reflects the current crop, then the CPU-rendered web preview replaces
+      // it when rendering completes.
+      setProcessedPreview(null);
+      zoomScaleRef.current = 1;
+      panOffsetRef.current = { x: 0, y: 0 };
+      initialZoomScale.current = 1;
+      initialPanOffset.current = { x: 0, y: 0 };
+    }
+    previousActiveTabRef.current = activeTab;
+  }, [activeTab]);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -231,10 +314,100 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     };
   }, [activeProject?.sourceUri, activeProject?.originalWidth, activeProject?.originalHeight]);
 
+  // Web preview uses the same CPU document renderer as export. This keeps
+  // masks, healing strokes, curves, and selective HSL edits pixel-based rather
+  // than approximating them with whole-image CSS overlays.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || typeof document === 'undefined') return;
+    const sourceUri = activeProject?.sourceUri;
+    if (!sourceUri) {
+      setProcessedPreview(null);
+      return;
+    }
+
+    let isCancelled = false;
+    // Do not leave the previous crop-sized bitmap on screen while the new
+    // document is rendering. The source fallback below is crop-positioned so
+    // the viewport remains truthful during this short asynchronous window.
+    setProcessedPreview(null);
+    const renderPreview = async () => {
+      try {
+        if (previewImageSourceRef.current !== sourceUri || !previewImagePromiseRef.current) {
+          const image = new (window as any).Image();
+          image.crossOrigin = 'anonymous';
+          previewImageSourceRef.current = sourceUri;
+          previewImagePromiseRef.current = new Promise<void>((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = () => reject(new Error('Preview image could not be loaded'));
+            image.src = sourceUri;
+          }).then(() => image);
+        }
+        const image = await previewImagePromiseRef.current;
+        if (isCancelled) return;
+
+        const naturalWidth = image.naturalWidth || activeProject?.originalWidth || 1920;
+        const naturalHeight = image.naturalHeight || activeProject?.originalHeight || 1080;
+        const maxDimension = 900;
+        const scale = Math.min(1, maxDimension / Math.max(naturalWidth, naturalHeight));
+        const width = Math.max(1, Math.round(naturalWidth * scale));
+        const height = Math.max(1, Math.round(naturalHeight * scale));
+        const sourceCanvas = document.createElement('canvas');
+        sourceCanvas.width = width;
+        sourceCanvas.height = height;
+        const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+        if (!sourceContext) throw new Error('Preview canvas is unavailable');
+        sourceContext.drawImage(image, 0, 0, width, height);
+
+        // Crop mode edits the frame against the complete oriented image. Once
+        // Done closes the mode, renderDocument produces the actual cropped
+        // bitmap used by the editor and export.
+        const previewDocument = activeTab === 'crop'
+          ? {
+              ...currentDoc,
+              crop: { ...currentDoc.crop, x: 0, y: 0, width: 1, height: 1 }
+            }
+          : currentDoc;
+        const rendered = renderDocument(
+          sourceContext.getImageData(0, 0, width, height).data,
+          width,
+          height,
+          previewDocument
+        );
+        const outputCanvas = document.createElement('canvas');
+        outputCanvas.width = rendered.width;
+        outputCanvas.height = rendered.height;
+        const outputContext = outputCanvas.getContext('2d');
+        if (!outputContext) throw new Error('Preview output canvas is unavailable');
+        const previewImageData = outputContext.createImageData(rendered.width, rendered.height);
+        previewImageData.data.set(rendered.pixels as any);
+        outputContext.putImageData(previewImageData, 0, 0);
+
+        if (!isCancelled) {
+          setProcessedPreview({
+            uri: outputCanvas.toDataURL('image/png'),
+            width: rendered.width,
+            height: rendered.height
+          });
+        }
+      } catch (error) {
+        // A tainted canvas can still display the source image. Export reports
+        // its own error, while the editor remains usable in this fallback.
+        if (!isCancelled) {
+          console.warn('Processed web preview unavailable:', error);
+          setProcessedPreview(null);
+        }
+      }
+    };
+
+    renderPreview();
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeProject?.sourceUri, activeProject?.originalHeight, activeProject?.originalWidth, activeTab, currentDoc]);
+
   const b = currentDoc.basic;
   const crop = currentDoc.crop;
   const g = currentDoc.colorGrading;
-  const m = currentDoc.hslMixer;
 
   const getPanLimits = useCallback((scale: number) => {
     const w = imgDisplayWidthRef.current || 360;
@@ -292,11 +465,10 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     initialPanOffset.current = { x: clampedX, y: clampedY };
   }, [getPanLimits]);
 
-  const handleViewportPressAt = useCallback((clientX: number, clientY: number) => {
-    if (activeTabRef.current !== 'erase') return;
+  const getNormalizedImagePoint = useCallback((clientX: number, clientY: number, localCoordinates = false) => {
     let localX = clientX;
     let localY = clientY;
-    if (Platform.OS === 'web' && viewportRef.current) {
+    if (!localCoordinates && Platform.OS === 'web' && viewportRef.current) {
       const domNode = (viewportRef.current as any)._touchableNode || viewportRef.current;
       if (domNode && domNode.getBoundingClientRect) {
         const rect = domNode.getBoundingClientRect();
@@ -304,25 +476,229 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         localY = clientY - rect.top;
       }
     }
+
     const vpW = viewportWidthRef.current || 360;
     const vpH = viewportHeightRef.current || 360;
-    const x = localX / vpW;
-    const y = localY / vpH;
+    const displayedWidth = imgDisplayWidthRef.current * zoomScaleRef.current;
+    const displayedHeight = imgDisplayHeightRef.current * zoomScaleRef.current;
+    const left = (vpW - displayedWidth) / 2 + panOffsetRef.current.x;
+    const top = (vpH - displayedHeight) / 2 + panOffsetRef.current.y;
+    return {
+      x: Math.max(0, Math.min(1, (localX - left) / Math.max(1, displayedWidth))),
+      y: Math.max(0, Math.min(1, (localY - top) / Math.max(1, displayedHeight)))
+    };
+  }, []);
+
+  const addEraseDab = useCallback((point: { x: number; y: number }) => {
+    const settings = eraseSettingsRef.current;
+    const sourceWidth = activeProject?.originalWidth || 1920;
+    const sourceHeight = activeProject?.originalHeight || 1080;
+    const radius = Math.max(0.002, Math.min(0.25, settings.brushSize / Math.max(sourceWidth, sourceHeight)));
+    const sourceX = Math.max(0, Math.min(1, point.x + radius * 2));
     addHealingSpot({
-      x: Math.max(0.05, Math.min(0.95, x)),
-      y: Math.max(0.05, Math.min(0.95, y)),
-      radius: 0.04,
-      sourceX: Math.max(0.05, Math.min(0.95, x + 0.05)),
-      sourceY: Math.max(0.05, Math.min(0.95, y)),
-      mode: 'heal',
-      opacity: 100
-    });
-  }, [addHealingSpot]);
+      x: point.x,
+      y: point.y,
+      radius,
+      sourceX,
+      sourceY: point.y,
+      mode: settings.mode,
+      opacity: 100,
+      // CpuImageEngine consumes this optional runtime setting while the
+      // persisted HealingSpot shape remains backwards compatible.
+      feather: settings.feather
+    } as any);
+  }, [activeProject?.originalHeight, activeProject?.originalWidth, addHealingSpot]);
+
+  const addMaskStrokePoints = useCallback((point: { x: number; y: number }) => {
+    const maskId = activeMaskRef.current?.id;
+    if (!maskId) return;
+    const latestMask = (useEditorStore.getState().currentDocument.masks || []).find(mask => mask.id === maskId);
+    if (!latestMask) return;
+
+    const previous = lastToolPointRef.current;
+    const distance = previous ? Math.hypot(point.x - previous.x, point.y - previous.y) : 0;
+    const steps = previous ? Math.max(1, Math.ceil(distance / 0.012)) : 1;
+    const additions: Array<{ x: number; y: number }> = [];
+    for (let index = 1; index <= steps; index++) {
+      const t = index / steps;
+      additions.push({
+        x: previous ? previous.x + (point.x - previous.x) * t : point.x,
+        y: previous ? previous.y + (point.y - previous.y) * t : point.y
+      });
+    }
+    updateMask(maskId, { points: [...(latestMask.points || []), ...additions] });
+    lastToolPointRef.current = point;
+  }, [updateMask]);
+
+  const paintToolAt = useCallback((clientX: number, clientY: number, localCoordinates = false) => {
+    const point = getNormalizedImagePoint(clientX, clientY, localCoordinates);
+    if (activeTabRef.current === 'erase') {
+      const previous = lastToolPointRef.current;
+      const distance = previous ? Math.hypot(point.x - previous.x, point.y - previous.y) : 0;
+      const settings = eraseSettingsRef.current;
+      const sourceWidth = activeProject?.originalWidth || 1920;
+      const sourceHeight = activeProject?.originalHeight || 1080;
+      const radius = Math.max(0.002, Math.min(0.25, settings.brushSize / Math.max(sourceWidth, sourceHeight)));
+      const spacing = Math.max(0.004, radius * 0.65);
+      const steps = previous ? Math.max(1, Math.ceil(distance / spacing)) : 1;
+      for (let index = 1; index <= steps; index++) {
+        const t = index / steps;
+        addEraseDab({
+          x: previous ? previous.x + (point.x - previous.x) * t : point.x,
+          y: previous ? previous.y + (point.y - previous.y) * t : point.y
+        });
+      }
+      lastToolPointRef.current = point;
+    } else if (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush') {
+      addMaskStrokePoints(point);
+    }
+  }, [activeProject?.originalHeight, activeProject?.originalWidth, addEraseDab, addMaskStrokePoints, getNormalizedImagePoint]);
+
+  const handleViewportPressAt = useCallback((clientX: number, clientY: number, localCoordinates = false) => {
+    if (activeTabRef.current !== 'erase' && !(activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush')) return;
+    paintToolAt(clientX, clientY, localCoordinates);
+  }, [paintToolAt]);
 
   // Split Divider PanResponder - using pageX for reliable tracking
   const splitDividerPageXRef = useRef(0);
   const viewportPageXRef = useRef(0);
   const viewportRef = useRef<View>(null);
+  const cropOverlayRef = useRef<View>(null);
+
+  const getCropFrameSize = useCallback(() => ({
+    width: Math.max(1, cropOverlaySizeRef.current.width || imgDisplayWidthRef.current || viewportWidthRef.current),
+    height: Math.max(1, cropOverlaySizeRef.current.height || imgDisplayHeightRef.current || viewportHeightRef.current)
+  }), []);
+
+  const startCropInteraction = useCallback((pointX: number, pointY: number, frameWidth: number, frameHeight: number, pointerId?: number) => {
+    if (activeTabRef.current !== 'crop' || cropInteractionRef.current) return false;
+    const bounds = clampCropBounds(cropBoundsRef.current);
+    const handle = getCropInteractionHandle(pointX, pointY, frameWidth, frameHeight, bounds);
+    if (!handle) return false;
+    cropInteractionRef.current = {
+      handle,
+      startX: pointX,
+      startY: pointY,
+      frameWidth,
+      frameHeight,
+      bounds,
+      pointerId
+    };
+    beginAdjustment();
+    return true;
+  }, [beginAdjustment]);
+
+  const moveCropInteraction = useCallback((pointX: number, pointY: number) => {
+    const interaction = cropInteractionRef.current;
+    if (!interaction) return;
+    const deltaX = (pointX - interaction.startX) / interaction.frameWidth;
+    const deltaY = (pointY - interaction.startY) / interaction.frameHeight;
+    const aspectRatio = getNormalizedCropAspectRatio(
+      cropAspectModeRef.current,
+      activeProject?.originalWidth || 1,
+      activeProject?.originalHeight || 1,
+      cropRotationRef.current
+    );
+    const nextBounds = interaction.handle === 'move'
+      ? moveCropBounds(interaction.bounds, deltaX, deltaY)
+      : resizeCropBounds(interaction.bounds, interaction.handle, deltaX, deltaY, aspectRatio);
+    cropBoundsRef.current = nextBounds;
+    updateCrop(nextBounds);
+  }, [activeProject?.originalHeight, activeProject?.originalWidth, updateCrop]);
+
+  const finishCropInteraction = useCallback(() => {
+    if (!cropInteractionRef.current) return;
+    cropInteractionRef.current = null;
+    endAdjustment();
+  }, [endAdjustment]);
+
+  const cropPanResponder = useMemo(
+    () => PanResponder.create({
+      onStartShouldSetPanResponder: () => activeTabRef.current === 'crop',
+      onMoveShouldSetPanResponder: () => activeTabRef.current === 'crop',
+      onPanResponderGrant: evt => {
+        const size = getCropFrameSize();
+        const pointX = evt.nativeEvent?.locationX ?? size.width / 2;
+        const pointY = evt.nativeEvent?.locationY ?? size.height / 2;
+        startCropInteraction(pointX, pointY, size.width, size.height);
+      },
+      onPanResponderMove: (_evt, gestureState) => {
+        const interaction = cropInteractionRef.current;
+        if (!interaction) return;
+        moveCropInteraction(
+          interaction.startX + gestureState.dx,
+          interaction.startY + gestureState.dy
+        );
+      },
+      onPanResponderRelease: finishCropInteraction,
+      onPanResponderTerminate: finishCropInteraction
+    }),
+    [finishCropInteraction, getCropFrameSize, moveCropInteraction, startCropInteraction]
+  );
+
+  // React Native Web's DOM pointer path is deliberately separate from the
+  // viewport zoom listener. The crop overlay captures first, converts client
+  // coordinates through its transformed bounding rect, and prevents a crop
+  // drag from becoming a zoom/pan gesture.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || activeTab !== 'crop') return;
+    const view = cropOverlayRef.current as any;
+    const domNode = view?._touchableNode || view;
+    if (!domNode?.addEventListener) return;
+
+    const getLocalPoint = (event: PointerEvent) => {
+      const rect = domNode.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
+        y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
+        width: Math.max(1, rect.width),
+        height: Math.max(1, rect.height)
+      };
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      const point = getLocalPoint(event);
+      const started = startCropInteraction(point.x, point.y, point.width, point.height, event.pointerId);
+      if (!started) {
+        // Crop mode owns the whole viewport so a tap in the dimmed area cannot
+        // fall through to the original-preview or zoom/pan handlers.
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      domNode.setPointerCapture?.(event.pointerId);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const interaction = cropInteractionRef.current;
+      if (!interaction || interaction.pointerId !== event.pointerId) return;
+      const point = getLocalPoint(event);
+      event.preventDefault();
+      event.stopPropagation();
+      moveCropInteraction(point.x, point.y);
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const interaction = cropInteractionRef.current;
+      if (!interaction || interaction.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finishCropInteraction();
+    };
+
+    domNode.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    return () => {
+      domNode.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      finishCropInteraction();
+    };
+  }, [activeTab, finishCropInteraction, moveCropInteraction, startCropInteraction]);
 
   const splitPanResponder = useRef(
     PanResponder.create({
@@ -361,12 +737,18 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       onStartShouldSetPanResponderCapture: (evt) => {
         if (isDraggingSplitRef.current) return false;
         const touches = evt?.nativeEvent?.touches?.length ?? 0;
+        if (touches === 1 && (activeTabRef.current === 'erase' || (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush'))) {
+          return true;
+        }
         return touches >= 2;
       },
       onMoveShouldSetPanResponderCapture: (evt, gestureState) => {
         if (isDraggingSplitRef.current) return false;
         const touches = evt?.nativeEvent?.touches?.length ?? 0;
         if (touches >= 2) return true;
+        if (activeTabRef.current === 'erase' || (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush')) {
+          return true;
+        }
         if (zoomScaleRef.current > 1.05 && activeTabRef.current !== 'crop') {
           return Math.abs(gestureState.dx) > 6 || Math.abs(gestureState.dy) > 6;
         }
@@ -374,7 +756,17 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       },
       onPanResponderGrant: (evt, gestureState) => {
         const touches = evt?.nativeEvent?.touches;
-        if (touches && touches.length >= 2 && touches[0] && touches[1]) {
+        if (touches && touches.length === 1 && (activeTabRef.current === 'erase' || (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush'))) {
+          isPaintingToolRef.current = true;
+          lastToolPointRef.current = null;
+          beginAdjustment();
+          const locX = evt.nativeEvent?.locationX ?? viewportWidthRef.current / 2;
+          const locY = evt.nativeEvent?.locationY ?? viewportHeightRef.current / 2;
+          handleViewportPressAt(locX, locY, true);
+        } else if (touches && touches.length >= 2 && touches[0] && touches[1]) {
+          if (isPaintingToolRef.current) endAdjustment();
+          isPaintingToolRef.current = false;
+          lastToolPointRef.current = null;
           isPinching.current = true;
           isPanning.current = false;
           const dx = touches[1].pageX - touches[0].pageX;
@@ -394,6 +786,12 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       },
       onPanResponderMove: (evt, gestureState) => {
         const touches = evt?.nativeEvent?.touches;
+        if (isPaintingToolRef.current && (!touches || touches.length < 2)) {
+          const locX = evt.nativeEvent?.locationX ?? gestureState.moveX;
+          const locY = evt.nativeEvent?.locationY ?? gestureState.moveY;
+          handleViewportPressAt(locX, locY, true);
+          return;
+        }
         // Two-finger Pinch Zoom (and pan)
         if (touches && touches.length >= 2 && touches[0] && touches[1]) {
           const dx = touches[1].pageX - touches[0].pageX;
@@ -429,6 +827,15 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         }
       },
       onPanResponderRelease: (evt, gestureState) => {
+        if (isPaintingToolRef.current) {
+          const locX = evt.nativeEvent?.locationX ?? gestureState.moveX;
+          const locY = evt.nativeEvent?.locationY ?? gestureState.moveY;
+          handleViewportPressAt(locX, locY, true);
+          isPaintingToolRef.current = false;
+          lastToolPointRef.current = null;
+          endAdjustment();
+          return;
+        }
         isPinching.current = false;
         isPanning.current = false;
         lastPinchDistance.current = 0;
@@ -450,13 +857,16 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
             handleDoubleTapAt(locX, locY);
           } else {
             lastTapRef.current = { time: now, x: locX, y: locY };
-            if (activeTabRef.current === 'erase') {
-              handleViewportPressAt(locX, locY);
+            if (activeTabRef.current === 'erase' || (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush')) {
+              handleViewportPressAt(locX, locY, true);
             }
           }
         }
       },
       onPanResponderTerminate: () => {
+        if (isPaintingToolRef.current) endAdjustment();
+        isPaintingToolRef.current = false;
+        lastToolPointRef.current = null;
         isPinching.current = false;
         isPanning.current = false;
         lastPinchDistance.current = 0;
@@ -466,24 +876,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     })
   ).current;
 
-  // 1. Generate precise 33-point transfer curves for R, G, B targeting:
-  // - Whites & Blacks: isolated luminance bands (Whites x > 0.65, Blacks x < 0.35)
-  // - Highlights & Shadows: isolated tonal registers (Highlights x > 0.45, Shadows x < 0.55)
-  // - 3-Way Color Grading: precise tonal isolation for Shadows (x < 0.45), Midtones (0.25 < x < 0.75), Highlights (x > 0.55), and Global
-  const gradingTables = useMemo(() => {
-    return generateColorGradingTables(b.whites, b.blacks, b.highlights, b.shadows, g, currentDoc.curves);
-  }, [b.whites, b.blacks, b.highlights, b.shadows, g, currentDoc.curves]);
-
-  // 1b. Generate 8-channel HSL Mixer matrix (Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta)
-  const hslMixerMatrix = useMemo(() => {
-    return generateHslMixerMatrix(m);
-  }, [m]);
-
-  // 2. 2D Spatial Convolution Kernel for Clarity (Texture enhancement):
-  // Micro-contrast acutance directly reveals fine surface textures (fabric, stone, skin pores, hair, foliage)
-  const kernelK = (b.clarity / 100) * 0.70 + (b.sharpening / 100) * 0.35;
-
-  // Curves modulation factors computed directly from currentDoc.curves
+  // Curves modulation factors are retained for the native fallback styling.
   const curvesMod = useMemo(() => {
     const c = currentDoc.curves;
     if (!c) {
@@ -537,30 +930,20 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     ? ` drop-shadow(0 0 0.5px rgba(0,0,0,${((b.sharpening / 100) * 0.65).toFixed(2)}))`
     : '';
 
-  // Dynamic tone filter ID so Web browsers (Chromium/WebKit) immediately invalidate the raster cache on curve/grade updates
-  const toneFilterId = `luma-tone-filter-${currentDoc.updatedAt || 0}`;
-
-  // Web filter string incorporating SVG tone filter and spatial convolution
-  const webFilterString = Platform.OS === 'web'
-    ? `url(#${toneFilterId}) brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`
-    : `brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`;
-
-  const webFilterStyle: any = isHoldingOriginal
-    ? {
-        transform: [
-          { rotate: `${crop.rotation + crop.straightenAngle}deg` },
-          { scaleX: crop.flipHorizontal ? -1 : 1 },
-          { scaleY: crop.flipVertical ? -1 : 1 }
-        ]
-      }
-    : {
-        filter: webFilterString,
-        transform: [
-          { rotate: `${crop.rotation + crop.straightenAngle}deg` },
-          { scaleX: crop.flipHorizontal ? -1 : 1 },
-          { scaleY: crop.flipVertical ? -1 : 1 }
-        ]
-      };
+  // The web image is already rendered by renderDocument. Native keeps the
+  // existing lightweight fallback filter until a native preview buffer is
+  // available.
+  const webFilterString = `brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`;
+  const fallbackImageTransform = {
+    transform: [
+      { rotate: `${crop.rotation + crop.straightenAngle}deg` },
+      { scaleX: crop.flipHorizontal ? -1 : 1 },
+      { scaleY: crop.flipVertical ? -1 : 1 }
+    ]
+  };
+  const webFilterStyle: any = isHoldingOriginal || (Platform.OS === 'web' && processedPreview)
+    ? fallbackImageTransform
+    : { ...fallbackImageTransform, filter: webFilterString };
 
   // Color temperature tint overlay
   const tempOverlayColor =
@@ -578,7 +961,17 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   // Exact contained photo dimensions (prevents any letterbox bleed to the edit screen)
   const origW = activeProject?.originalWidth || 1920;
   const origH = activeProject?.originalHeight || 1080;
-  const imgRatio = origW / origH;
+  const isCropMode = activeTab === 'crop';
+  const orientedSource = getOrientedSourceDimensions(origW, origH, crop.rotation);
+  const fullCropBounds: CropBounds = { x: 0, y: 0, width: 1, height: 1 };
+  const displayedCropBounds = isCropMode ? fullCropBounds : clampCropBounds(crop);
+  const showProcessedPreview = Platform.OS === 'web' && Boolean(processedPreview) && !isHoldingOriginal;
+  const fallbackCropRatio = (
+    displayedCropBounds.width * orientedSource.width
+  ) / Math.max(1, displayedCropBounds.height * orientedSource.height);
+  const imgRatio = showProcessedPreview && processedPreview
+    ? processedPreview.width / Math.max(1, processedPreview.height)
+    : isHoldingOriginal ? origW / origH : fallbackCropRatio;
   const vpW = viewportWidth || 360;
   const vpH = viewportHeight || 360;
   const vpRatio = vpW / vpH;
@@ -599,6 +992,16 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   // Sync image display dimensions to refs for instant gesture calculations
   imgDisplayWidthRef.current = imgDisplayWidth;
   imgDisplayHeightRef.current = imgDisplayHeight;
+  const fallbackFullWidth = imgDisplayWidth / Math.max(0.001, displayedCropBounds.width);
+  const fallbackFullHeight = imgDisplayHeight / Math.max(0.001, displayedCropBounds.height);
+  const isQuarterTurn = crop.rotation % 360 === 90 || crop.rotation % 360 === -90 || crop.rotation % 360 === 270;
+  const fallbackSourceWidth = isQuarterTurn ? fallbackFullHeight : fallbackFullWidth;
+  const fallbackSourceHeight = isQuarterTurn ? fallbackFullWidth : fallbackFullHeight;
+  const straightenRadians = (crop.straightenAngle * Math.PI) / 180;
+  const straightenCover = Math.max(
+    Math.abs(Math.cos(straightenRadians)) + (fallbackFullHeight / Math.max(1, fallbackFullWidth)) * Math.abs(Math.sin(straightenRadians)),
+    Math.abs(Math.cos(straightenRadians)) + (fallbackFullWidth / Math.max(1, fallbackFullHeight)) * Math.abs(Math.sin(straightenRadians))
+  );
 
   // Web Pointer & Wheel listeners for desktop & mobile web
   useEffect(() => {
@@ -617,6 +1020,14 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         initialPanOffset.current = { ...panOffsetRef.current };
         hasMovedSignificantlyRef.current = false;
 
+        if (activeTabRef.current === 'erase' || (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush')) {
+          isPaintingToolRef.current = true;
+          lastToolPointRef.current = null;
+          beginAdjustment();
+          handleViewportPressAt(e.clientX, e.clientY);
+          return;
+        }
+
         // Long press detection for original photo preview
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = setTimeout(() => {
@@ -627,6 +1038,9 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       } else if (activePointersRef.current.size === 2) {
         // Multi-touch pinch zoom started
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        if (isPaintingToolRef.current) endAdjustment();
+        isPaintingToolRef.current = false;
+        lastToolPointRef.current = null;
         setHoldingOriginal(false);
         isPinching.current = true;
         const pts = Array.from(activePointersRef.current.values());
@@ -647,6 +1061,8 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
 
       // Multi-touch Pinch Zoom
       if (activePointersRef.current.size >= 2) {
+        if (isPaintingToolRef.current) endAdjustment();
+        isPaintingToolRef.current = false;
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         const pts = Array.from(activePointersRef.current.values());
         const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
@@ -673,6 +1089,11 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       }
       // Single Pointer Pan (when zoomed in)
       else if (activePointersRef.current.size === 1) {
+        if (isPaintingToolRef.current) {
+          paintToolAt(e.clientX, e.clientY);
+          hasMovedSignificantlyRef.current = true;
+          return;
+        }
         const dx = e.clientX - dragStartPosRef.current.x;
         const dy = e.clientY - dragStartPosRef.current.y;
         if (Math.hypot(dx, dy) > 6) {
@@ -697,7 +1118,16 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       setHoldingOriginal(false);
 
       const hadMultiple = activePointersRef.current.size >= 2;
+      const wasPainting = isPaintingToolRef.current;
+      if (wasPainting && !hadMultiple) {
+        paintToolAt(e.clientX, e.clientY);
+        isPaintingToolRef.current = false;
+        lastToolPointRef.current = null;
+        endAdjustment();
+      }
       activePointersRef.current.delete(e.pointerId);
+
+      if (wasPainting && !hadMultiple) return;
 
       if (hadMultiple && activePointersRef.current.size < 2) {
         // Pinching stopped: FIX zoom scale and pan offset exactly where user released
@@ -723,7 +1153,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
             handleDoubleTapAt(e.clientX, e.clientY);
           } else {
             lastTapRef.current = { time: now, x: e.clientX, y: e.clientY };
-            if (activeTabRef.current === 'erase') {
+            if (activeTabRef.current === 'erase' || (activeTabRef.current === 'masking' && activeMaskRef.current?.type === 'brush')) {
               handleViewportPressAt(e.clientX, e.clientY);
             }
           }
@@ -772,223 +1202,55 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       window.removeEventListener('pointercancel', onPointerUp);
       domNode.removeEventListener('wheel', onWheelNative);
     };
-  }, [getPanLimits, handleDoubleTapAt, handleViewportPressAt]);
+  }, [beginAdjustment, endAdjustment, getPanLimits, handleDoubleTapAt, handleViewportPressAt, paintToolAt]);
 
   // Vignette parameters
-  const isVignetteActive = !isHoldingOriginal && Math.abs(b.vignette) > 2;
+  const isVignetteActive = Platform.OS !== 'web' && !isHoldingOriginal && Math.abs(b.vignette) > 2;
   const vignetteAlpha = Math.min(0.9, Math.abs(b.vignette / 100) * 0.9);
   const vignetteUri = b.vignette > 0 ? VIGNETTE_BLACK_URI : VIGNETTE_WHITE_URI;
 
   // Film Grain parameters
-  const isGrainActive = !isHoldingOriginal && b.grain > 2;
+  const isGrainActive = Platform.OS !== 'web' && !isHoldingOriginal && b.grain > 2;
   const grainAlpha = Math.min(0.65, (b.grain / 100) * 0.65);
 
   const handleExport = async (options: ExportOptions) => {
     try {
       if (Platform.OS === 'web') {
-        // Web export: render to canvas and download
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        if (!ctx || !activeProject?.sourceUri) throw new Error('Canvas not available');
-
-        const img = new (window as any).Image();
-        img.crossOrigin = 'anonymous';
-        
+        if (!activeProject?.sourceUri) throw new Error('Source URI missing');
+        const image = new (window as any).Image();
+        image.crossOrigin = 'anonymous';
         await new Promise<void>((resolve, reject) => {
-          img.onload = () => resolve();
-          img.onerror = () => reject(new Error('Failed to load image'));
-          img.src = activeProject.sourceUri;
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error('Failed to load image'));
+          image.src = activeProject.sourceUri;
         });
 
-        const w = Math.round((activeProject.originalWidth || img.naturalWidth) * options.scale);
-        const h = Math.round((activeProject.originalHeight || img.naturalHeight) * options.scale);
-        canvas.width = w;
-        canvas.height = h;
+        const sourceWidth = Math.max(1, Math.round((activeProject.originalWidth || image.naturalWidth) * options.scale));
+        const sourceHeight = Math.max(1, Math.round((activeProject.originalHeight || image.naturalHeight) * options.scale));
+        const sourceCanvas = document.createElement('canvas');
+        sourceCanvas.width = sourceWidth;
+        sourceCanvas.height = sourceHeight;
+        const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true });
+        if (!sourceContext) throw new Error('Canvas not available');
+        sourceContext.drawImage(image, 0, 0, sourceWidth, sourceHeight);
 
-        // Apply CSS filter equivalent on canvas
-        ctx.filter = webFilterString;
-
-        // Apply transforms
-        ctx.save();
-        ctx.translate(w / 2, h / 2);
-        ctx.rotate(((crop.rotation + crop.straightenAngle) * Math.PI) / 180);
-        ctx.scale(crop.flipHorizontal ? -1 : 1, crop.flipVertical ? -1 : 1);
-        ctx.drawImage(img, -w / 2, -h / 2, w, h);
-        ctx.restore();
-
-        // Temperature tint overlay
-        if (Math.abs(b.temperature) > 2) {
-          ctx.globalAlpha = Math.min(0.25, Math.abs(b.temperature / 100) * 0.25);
-          ctx.fillStyle = b.temperature > 0 ? 'rgb(245, 158, 11)' : 'rgb(59, 130, 246)';
-          ctx.fillRect(0, 0, w, h);
-          ctx.globalAlpha = 1.0;
-        }
-
-        // Vignette (positive = black, negative = white)
-        if (Math.abs(b.vignette) > 2) {
-          const gradient = ctx.createRadialGradient(w / 2, h / 2, w * 0.25, w / 2, h / 2, w * 0.75);
-          gradient.addColorStop(0, 'rgba(0,0,0,0)');
-          const vigColor = b.vignette > 0 ? `rgba(0,0,0,${vignetteAlpha})` : `rgba(255,255,255,${vignetteAlpha})`;
-          gradient.addColorStop(1, vigColor);
-          ctx.fillStyle = gradient;
-          ctx.fillRect(0, 0, w, h);
-        }
-
-        // Grain, Luminance-targeted Whites, Blacks, Clarity Texture, and 3-Way Color Grading
-        const wFactor = b.whites / 100;
-        const bFactor = b.blacks / 100;
-        const cFactor = b.clarity / 100;
-        const hasColorGrading = g && (
-          g.shadows.saturation > 0 || g.shadows.hue > 0 || Math.abs(g.shadows.luminance) > 0 ||
-          g.midtones.saturation > 0 || g.midtones.hue > 0 || Math.abs(g.midtones.luminance) > 0 ||
-          g.highlights.saturation > 0 || g.highlights.hue > 0 || Math.abs(g.highlights.luminance) > 0 ||
-          g.global.saturation > 0 || g.global.hue > 0 || Math.abs(g.global.luminance) > 0
+        const rendered = renderDocument(
+          sourceContext.getImageData(0, 0, sourceWidth, sourceHeight).data,
+          sourceWidth,
+          sourceHeight,
+          currentDoc
         );
-        const hasHslMixer = m && m.some(ch => ch.hue !== 0 || ch.saturation !== 0 || ch.luminance !== 0);
-        const hslCoeffs = computeHslMixerCoefficients(m);
+        const outputCanvas = document.createElement('canvas');
+        outputCanvas.width = rendered.width;
+        outputCanvas.height = rendered.height;
+        const outputContext = outputCanvas.getContext('2d');
+        if (!outputContext) throw new Error('Output canvas not available');
+        const outputImageData = outputContext.createImageData(rendered.width, rendered.height);
+        outputImageData.data.set(rendered.pixels as any);
+        outputContext.putImageData(outputImageData, 0, 0);
 
-        if (b.grain > 0 || Math.abs(wFactor) > 0.02 || Math.abs(bFactor) > 0.02 || Math.abs(cFactor) > 0.02 || hasColorGrading || hasHslMixer) {
-          const grainIntensity = b.grain / 100;
-
-          // Helper: convert HSL to RGB array [0..255]
-          const hsl2rgb = (hDeg: number, sRatio: number, lRatio: number): [number, number, number] => {
-            const c = (1 - Math.abs(2 * lRatio - 1)) * sRatio;
-            const hp = hDeg / 60;
-            const x = c * (1 - Math.abs((hp % 2) - 1));
-            let r1 = 0, g1 = 0, b1 = 0;
-            if (hp >= 0 && hp < 1) { r1 = c; g1 = x; }
-            else if (hp >= 1 && hp < 2) { r1 = x; g1 = c; }
-            else if (hp >= 2 && hp < 3) { g1 = c; b1 = x; }
-            else if (hp >= 3 && hp < 4) { g1 = x; b1 = c; }
-            else if (hp >= 4 && hp < 5) { r1 = x; b1 = c; }
-            else if (hp >= 5 && hp < 6) { r1 = c; b1 = x; }
-            const mVal = lRatio - c / 2;
-            return [(r1 + mVal) * 255, (g1 + mVal) * 255, (b1 + mVal) * 255];
-          };
-
-          const sColor = g ? hsl2rgb(g.shadows.hue, g.shadows.saturation / 100, 0.5) : [128, 128, 128];
-          const mColor = g ? hsl2rgb(g.midtones.hue, g.midtones.saturation / 100, 0.5) : [128, 128, 128];
-          const hColor = g ? hsl2rgb(g.highlights.hue, g.highlights.saturation / 100, 0.5) : [128, 128, 128];
-          const globColor = g ? hsl2rgb(g.global.hue, g.global.saturation / 100, 0.5) : [128, 128, 128];
-
-          const sWeight = g ? (g.shadows.saturation / 100) * 0.45 : 0;
-          const mWeight = g ? (g.midtones.saturation / 100) * 0.40 : 0;
-          const hWeight = g ? (g.highlights.saturation / 100) * 0.40 : 0;
-          const globWeight = g ? (g.global.saturation / 100) * 0.35 : 0;
-
-          const imageData = ctx.getImageData(0, 0, w, h);
-          const data = imageData.data;
-
-          for (let i = 0; i < data.length; i += 4) {
-            let rPixel = data[i];
-            let gPixel = data[i + 1];
-            let bPixel = data[i + 2];
-            // Rec. 709 luminance
-            const lum = (0.2126 * rPixel + 0.7152 * gPixel + 0.0722 * bPixel) / 255;
-
-            let delta = 0;
-
-            // 1. Whites: increases/decreases light in the white/bright areas (lum > 0.65)
-            if (lum > 0.65) {
-              const weight = Math.pow((lum - 0.65) / 0.35, 1.8);
-              delta += wFactor * 75 * weight;
-            }
-
-            // 2. Blacks: increases/decreases light in the black/dark areas (lum < 0.35)
-            if (lum < 0.35) {
-              const weight = Math.pow((0.35 - lum) / 0.35, 1.8);
-              delta += bFactor * 65 * weight;
-            }
-
-            // 3. Clarity / Texture: midtone texture pop
-            if (Math.abs(cFactor) > 0.02 && lum > 0.15 && lum < 0.85) {
-              const midtoneWeight = Math.sin(((lum - 0.15) / 0.70) * Math.PI);
-              delta += (lum - 0.5) * cFactor * 50 * midtoneWeight;
-            }
-
-            // 4. Grain noise
-            if (b.grain > 0) {
-              const noise = (Math.random() - 0.5) * grainIntensity * 50;
-              delta += noise;
-            }
-
-            rPixel += delta;
-            gPixel += delta;
-            bPixel += delta;
-
-            // 5. 3-Way Color Grading
-            if (hasColorGrading && g) {
-              const balance = g.balance || 0;
-              const blending = g.blending ?? 50;
-              const centerPoint = 0.50 + (balance / 100) * 0.18;
-              const blendWidth = 0.22 + (blending / 100) * 0.36;
-              const shadowCutoff = Math.min(0.85, Math.max(0.20, centerPoint + blendWidth * 0.5));
-              const highlightCutoff = Math.max(0.15, Math.min(0.80, centerPoint - blendWidth * 0.5));
-
-              const shadowFactor = lum < shadowCutoff ? Math.pow((shadowCutoff - lum) / shadowCutoff, 1.6) : 0;
-              const highlightFactor = lum > highlightCutoff ? Math.pow((lum - highlightCutoff) / (1.0 - highlightCutoff), 1.6) : 0;
-              const midtoneFactor = Math.max(0, 1.0 - shadowFactor - highlightFactor);
-
-              if (sWeight > 0) {
-                rPixel = rPixel * (1 - sWeight * shadowFactor) + sColor[0] * sWeight * shadowFactor;
-                gPixel = gPixel * (1 - sWeight * shadowFactor) + sColor[1] * sWeight * shadowFactor;
-                bPixel = bPixel * (1 - sWeight * shadowFactor) + sColor[2] * sWeight * shadowFactor;
-              }
-              if (mWeight > 0) {
-                rPixel = rPixel * (1 - mWeight * midtoneFactor) + mColor[0] * mWeight * midtoneFactor;
-                gPixel = gPixel * (1 - mWeight * midtoneFactor) + mColor[1] * mWeight * midtoneFactor;
-                bPixel = bPixel * (1 - mWeight * midtoneFactor) + mColor[2] * mWeight * midtoneFactor;
-              }
-              if (hWeight > 0) {
-                rPixel = rPixel * (1 - hWeight * highlightFactor) + hColor[0] * hWeight * highlightFactor;
-                gPixel = gPixel * (1 - hWeight * highlightFactor) + hColor[1] * hWeight * highlightFactor;
-                bPixel = bPixel * (1 - hWeight * highlightFactor) + hColor[2] * hWeight * highlightFactor;
-              }
-              if (globWeight > 0) {
-                rPixel = rPixel * (1 - globWeight) + globColor[0] * globWeight;
-                gPixel = gPixel * (1 - globWeight) + globColor[1] * globWeight;
-                bPixel = bPixel * (1 - globWeight) + globColor[2] * globWeight;
-              }
-
-              // Luminance shifts
-              if (g.shadows.luminance !== 0 && shadowFactor > 0) {
-                const shift = (g.shadows.luminance / 100) * 40 * shadowFactor;
-                rPixel += shift; gPixel += shift; bPixel += shift;
-              }
-              if (g.midtones.luminance !== 0 && midtoneFactor > 0) {
-                const shift = (g.midtones.luminance / 100) * 40 * midtoneFactor;
-                rPixel += shift; gPixel += shift; bPixel += shift;
-              }
-              if (g.highlights.luminance !== 0 && highlightFactor > 0) {
-                const shift = (g.highlights.luminance / 100) * 40 * highlightFactor;
-                rPixel += shift; gPixel += shift; bPixel += shift;
-              }
-              if (g.global.luminance !== 0) {
-                const shift = (g.global.luminance / 100) * 40;
-                rPixel += shift; gPixel += shift; bPixel += shift;
-              }
-            }
-
-            // 6. 8-Channel HSL Mixer transformation
-            if (hasHslMixer) {
-              const mixedR = rPixel * hslCoeffs.r_r + gPixel * hslCoeffs.r_g + bPixel * hslCoeffs.r_b + hslCoeffs.r_const * 255;
-              const mixedG = rPixel * hslCoeffs.g_r + gPixel * hslCoeffs.g_g + bPixel * hslCoeffs.g_b + hslCoeffs.g_const * 255;
-              const mixedB = rPixel * hslCoeffs.b_r + gPixel * hslCoeffs.b_g + bPixel * hslCoeffs.b_b + hslCoeffs.b_const * 255;
-              rPixel = mixedR;
-              gPixel = mixedG;
-              bPixel = mixedB;
-            }
-
-            data[i] = Math.max(0, Math.min(255, rPixel));
-            data[i + 1] = Math.max(0, Math.min(255, gPixel));
-            data[i + 2] = Math.max(0, Math.min(255, bPixel));
-          }
-          ctx.putImageData(imageData, 0, 0);
-        }
-
-        // Convert to blob and download
         const mimeType = options.format === 'png' ? 'image/png' : 'image/jpeg';
-        const dataUrl = canvas.toDataURL(mimeType, options.quality);
+        const dataUrl = outputCanvas.toDataURL(mimeType, options.quality);
         const link = document.createElement('a');
         link.download = `lumaflow_export_${Date.now()}.${options.format}`;
         link.href = dataUrl;
@@ -996,7 +1258,6 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         link.click();
         document.body.removeChild(link);
       } else {
-        // Native high-resolution export powered by RustNativeEngine
         if (!activeProject?.sourceUri) throw new Error('Source URI missing');
         const engine = getActiveImageEngine();
         const exportedUri = await engine.exportFullResolution(activeProject.sourceUri, currentDoc, options);
@@ -1076,41 +1337,6 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
               } as any) : {}
             ]}
           >
-            {/* SVG Photometric Filter for Web (Pixel-level luminance targeting for Whites/Blacks and spatial convolution for Texture) */}
-            {Platform.OS === 'web' && React.createElement(
-              'svg',
-              {
-                style: { position: 'absolute', width: 0, height: 0, pointerEvents: 'none' },
-                'aria-hidden': 'true',
-              },
-              React.createElement(
-                'defs',
-                null,
-                React.createElement(
-                  'filter',
-                  { id: toneFilterId, key: toneFilterId, colorInterpolationFilters: 'sRGB' },
-                  Math.abs(kernelK) > 0.02
-                    ? React.createElement('feConvolveMatrix', {
-                        order: '3',
-                        kernelMatrix: `0 ${(-kernelK).toFixed(3)} 0 ${(-kernelK).toFixed(3)} ${(1 + 4 * kernelK).toFixed(3)} ${(-kernelK).toFixed(3)} 0 ${(-kernelK).toFixed(3)} 0`,
-                        preserveAlpha: 'true',
-                      })
-                    : null,
-                  React.createElement(
-                    'feComponentTransfer',
-                    null,
-                    React.createElement('feFuncR', { type: 'table', tableValues: gradingTables.tableR }),
-                    React.createElement('feFuncG', { type: 'table', tableValues: gradingTables.tableG }),
-                    React.createElement('feFuncB', { type: 'table', tableValues: gradingTables.tableB })
-                  ),
-                  React.createElement('feColorMatrix', {
-                    type: 'matrix',
-                    values: hslMixerMatrix,
-                  })
-                )
-              )
-            )}
-
             {/* The Constrained Photo Canvas (Matches exact photo aspect ratio - ZERO bleed into black bars!) */}
             <View
               style={[
@@ -1127,7 +1353,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
               ]}
             >
               {/* Split View: Left side is untouched Original */}
-              {isSplitActive && (
+              {isSplitActive && activeTab !== 'crop' && (
                 <View
                   style={[
                     styles.splitBeforeContainer,
@@ -1164,17 +1390,55 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                   }
                 ]}
               >
-                <Image
-                  source={{ uri: activeProject.sourceUri }}
-                  style={[
-                    { width: imgDisplayWidth, height: imgDisplayHeight },
-                    webFilterStyle,
-                    isSplitActive && {
-                      marginLeft: -imgDisplayWidth * splitPosition,
-                    }
-                  ]}
-                  resizeMode="cover"
-                />
+                {(showProcessedPreview || isHoldingOriginal) ? (
+                  <Image
+                    source={{ uri: showProcessedPreview && processedPreview ? processedPreview.uri : activeProject.sourceUri }}
+                    style={[
+                      { width: imgDisplayWidth, height: imgDisplayHeight },
+                      showProcessedPreview ? { transform: [] } : webFilterStyle,
+                      isSplitActive && { marginLeft: -imgDisplayWidth * splitPosition }
+                    ]}
+                    resizeMode="cover"
+                  />
+                ) : (
+                  /*
+                   * Native has no pixel buffer for a processed preview. This
+                   * nested, clipped source canvas maps the selected crop back
+                   * onto the output frame immediately, including quarter-turn
+                   * transforms, instead of leaving the source image full-size.
+                   */
+                  <View
+                    style={[
+                      styles.fallbackImageCanvas,
+                      {
+                        width: fallbackFullWidth,
+                        height: fallbackFullHeight,
+                        left: (isSplitActive ? -imgDisplayWidth * splitPosition : 0) - displayedCropBounds.x * fallbackFullWidth,
+                        top: -displayedCropBounds.y * fallbackFullHeight
+                      }
+                    ]}
+                  >
+                    <Image
+                      source={{ uri: activeProject.sourceUri }}
+                      style={[
+                        styles.fallbackSourceImage,
+                        {
+                          width: fallbackSourceWidth,
+                          height: fallbackSourceHeight,
+                          left: (fallbackFullWidth - fallbackSourceWidth) / 2,
+                          top: (fallbackFullHeight - fallbackSourceHeight) / 2,
+                          transform: [
+                            { rotate: `${crop.rotation + crop.straightenAngle}deg` },
+                            { scale: straightenCover },
+                            { scaleX: crop.flipHorizontal ? -1 : 1 },
+                            { scaleY: crop.flipVertical ? -1 : 1 }
+                          ]
+                        }
+                      ]}
+                      resizeMode="cover"
+                    />
+                  </View>
+                )}
 
                 {/* Native Mobile Visual Adjustments (Guarantees Whites, Blacks, Clarity, Sharpening, Exposure, Highlights, Shadows work visibly on Android) */}
                 {Platform.OS !== 'web' && !isHoldingOriginal && (
@@ -1295,7 +1559,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 )}
 
                 {/* Temperature Tint Layer */}
-                {!isHoldingOriginal && Math.abs(b.temperature) > 2 && (
+                {Platform.OS !== 'web' && !isHoldingOriginal && Math.abs(b.temperature) > 2 && (
                   <View
                     style={[
                       StyleSheet.absoluteFill,
@@ -1305,7 +1569,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 )}
 
                 {/* Green / Magenta Tint Layer */}
-                {!isHoldingOriginal && Math.abs(b.tint) > 2 && (
+                {Platform.OS !== 'web' && !isHoldingOriginal && Math.abs(b.tint) > 2 && (
                   <View
                     style={[
                       StyleSheet.absoluteFill,
@@ -1315,7 +1579,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 )}
 
                 {/* Lifted Shadows (Matte Film) Overlay */}
-                {!isHoldingOriginal && curvesMod.liftMod > 0.02 && (
+                {Platform.OS !== 'web' && !isHoldingOriginal && curvesMod.liftMod > 0.02 && (
                   <View
                     style={[
                       StyleSheet.absoluteFill,
@@ -1329,7 +1593,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                 )}
 
                 {/* Blue / Warm Curve Channel Tint Layer */}
-                {!isHoldingOriginal && (Math.abs(curvesMod.tintB) > 0.05 || Math.abs(curvesMod.tintR) > 0.05) && (
+                {Platform.OS !== 'web' && !isHoldingOriginal && (Math.abs(curvesMod.tintB) > 0.05 || Math.abs(curvesMod.tintR) > 0.05) && (
                   <View
                     style={[
                       StyleSheet.absoluteFill,
@@ -1458,35 +1722,6 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                   </>
                 )}
 
-                {/* Selective HSL Mixer Channel Tint Layers (Native Mobile only) */}
-                {Platform.OS !== 'web' && !isHoldingOriginal && m && (
-                  <>
-                    {m.map((ch, idx) => {
-                      if (ch.saturation === 0 && ch.luminance === 0 && ch.hue === 0) return null;
-                      const CH_HUES = [0, 25, 45, 120, 185, 215, 280, 320];
-                      const chHue = (CH_HUES[idx] + ch.hue * 0.4 + 360) % 360;
-                      const hueWeight = (Math.abs(ch.hue) / 100) * 0.30;
-                      const satWeight = (Math.abs(ch.saturation) / 100) * 0.25;
-                      const lumWeight = (Math.abs(ch.luminance) / 100) * 0.15;
-                      const totalOpacity = Math.min(0.42, hueWeight + satWeight + lumWeight);
-                      const baseSat = Math.abs(ch.hue) > 0 && ch.saturation === 0 ? 45 : Math.max(10, 50 + ch.saturation * 0.4);
-                      return (
-                        <View
-                          key={`hsl_ch_${idx}`}
-                          style={[
-                            StyleSheet.absoluteFill,
-                            {
-                              backgroundColor: `hsl(${chHue}, ${baseSat}%, ${Math.max(10, Math.min(90, 50 + ch.luminance * 0.35))}%)`,
-                              opacity: totalOpacity,
-                              pointerEvents: 'none' as any
-                            }
-                          ]}
-                        />
-                      );
-                    })}
-                  </>
-                )}
-
                 {/* Vignette Overlay (Cross-platform texture for Android, iOS, Web) */}
                 {isVignetteActive && (
                   <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -1534,16 +1769,35 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
 
               {/* Crop Overlay with Rule of Thirds Grid */}
               {activeTab === 'crop' && (
-                <View style={styles.cropOverlay} pointerEvents="none">
+                <View
+                  ref={cropOverlayRef}
+                  style={[
+                    styles.cropOverlay,
+                    Platform.OS === 'web' ? ({
+                      touchAction: 'none',
+                      userSelect: 'none',
+                      WebkitUserSelect: 'none',
+                      cursor: 'crosshair'
+                    } as any) : {}
+                  ]}
+                  pointerEvents="box-only"
+                  onLayout={event => {
+                    cropOverlaySizeRef.current = {
+                      width: event.nativeEvent.layout.width,
+                      height: event.nativeEvent.layout.height
+                    };
+                  }}
+                  {...(Platform.OS === 'web' ? {} : cropPanResponder.panHandlers)}
+                >
                   {/* Crop boundary rectangle */}
                   <View
                     style={[
                       styles.cropBoundary,
                       {
-                        left: `${crop.x * 100}%`,
-                        top: `${crop.y * 100}%`,
-                        width: `${crop.width * 100}%`,
-                        height: `${crop.height * 100}%`,
+                        left: `${clampCropBounds(crop).x * 100}%`,
+                        top: `${clampCropBounds(crop).y * 100}%`,
+                        width: `${clampCropBounds(crop).width * 100}%`,
+                        height: `${clampCropBounds(crop).height * 100}%`,
                       }
                     ]}
                   >
@@ -1557,13 +1811,17 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                     <View style={[styles.cropCorner, styles.cornerTR]} />
                     <View style={[styles.cropCorner, styles.cornerBL]} />
                     <View style={[styles.cropCorner, styles.cornerBR]} />
+                    <View style={[styles.cropSideHandle, styles.sideLeft]} />
+                    <View style={[styles.cropSideHandle, styles.sideRight]} />
+                    <View style={[styles.cropSideHandle, styles.sideTop]} />
+                    <View style={[styles.cropSideHandle, styles.sideBottom]} />
                   </View>
 
                   {/* Dimmed areas outside crop */}
-                  <View style={[styles.cropDimmed, { top: 0, left: 0, right: 0, height: `${crop.y * 100}%` }]} />
-                  <View style={[styles.cropDimmed, { bottom: 0, left: 0, right: 0, height: `${(1 - crop.y - crop.height) * 100}%` }]} />
-                  <View style={[styles.cropDimmed, { top: `${crop.y * 100}%`, left: 0, width: `${crop.x * 100}%`, height: `${crop.height * 100}%` }]} />
-                  <View style={[styles.cropDimmed, { top: `${crop.y * 100}%`, right: 0, width: `${(1 - crop.x - crop.width) * 100}%`, height: `${crop.height * 100}%` }]} />
+                  <View style={[styles.cropDimmed, { top: 0, left: 0, right: 0, height: `${clampCropBounds(crop).y * 100}%` }]} />
+                  <View style={[styles.cropDimmed, { bottom: 0, left: 0, right: 0, height: `${(1 - clampCropBounds(crop).y - clampCropBounds(crop).height) * 100}%` }]} />
+                  <View style={[styles.cropDimmed, { top: `${clampCropBounds(crop).y * 100}%`, left: 0, width: `${clampCropBounds(crop).x * 100}%`, height: `${clampCropBounds(crop).height * 100}%` }]} />
+                  <View style={[styles.cropDimmed, { top: `${clampCropBounds(crop).y * 100}%`, right: 0, width: `${(1 - clampCropBounds(crop).x - clampCropBounds(crop).width) * 100}%`, height: `${clampCropBounds(crop).height * 100}%` }]} />
                 </View>
               )}
 
@@ -1575,13 +1833,32 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                     styles.healingSpotOverlay,
                     {
                       left: `${spot.x * 100}%`,
-                      top: `${spot.y * 100}%`
+                      top: `${spot.y * 100}%`,
+                      width: Math.max(20, spot.radius * imgDisplayWidth * 2),
+                      height: Math.max(20, spot.radius * imgDisplayWidth * 2),
+                      marginLeft: -Math.max(10, spot.radius * imgDisplayWidth),
+                      marginTop: -Math.max(10, spot.radius * imgDisplayWidth),
+                      backgroundColor: selectedHealingSpotId === spot.id
+                        ? 'rgba(251, 146, 60, 0.55)'
+                        : 'rgba(239, 68, 68, 0.35)',
+                      borderColor: selectedHealingSpotId === spot.id ? '#fb923c' : '#ef4444'
                     }
                   ]}
-                  onPress={() => removeHealingSpot(spot.id)}
+                  onPress={() => {
+                    if (selectedHealingSpotId === spot.id) {
+                      removeHealingSpot(spot.id);
+                      setSelectedHealingSpotId(null);
+                    } else {
+                      setSelectedHealingSpotId(spot.id);
+                    }
+                  }}
+                  onLongPress={() => {
+                    removeHealingSpot(spot.id);
+                    setSelectedHealingSpotId(null);
+                  }}
                 >
                   <View style={styles.healingSpotPulse} />
-                  <Text style={styles.healingSpotX}>✕</Text>
+                  <Text style={styles.healingSpotX}>{selectedHealingSpotId === spot.id ? '✕' : '•'}</Text>
                 </TouchableOpacity>
               ))}
 
@@ -1589,51 +1866,88 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
               {activeTab === 'masking' && (currentDoc.masks || []).length > 0 && (
                 <View style={styles.maskRubylithOverlay} pointerEvents="none">
                   {(currentDoc.masks || []).map(mask => {
+                    const maskColor = mask.inverted ? '#22d3ee' : '#ef4444';
+                    const maskFill = mask.inverted ? 'rgba(34, 211, 238, 0.16)' : 'rgba(239, 68, 68, 0.24)';
+                    const maskIsActive = mask.id === activeMaskId;
                     if (mask.type === 'radial') {
                       return (
-                        <View
-                          key={mask.id}
-                          style={[
-                            styles.maskRadialCircle,
-                            {
-                              left: `${(mask.center?.x || 0.5) * 100 - (mask.radiusX || 0.35) * 100}%`,
-                              top: `${(mask.center?.y || 0.5) * 100 - (mask.radiusY || 0.35) * 100}%`,
-                              width: `${(mask.radiusX || 0.35) * 200}%`,
-                              height: `${(mask.radiusY || 0.35) * 200}%`,
-                            }
-                          ]}
-                        />
+                        <View key={mask.id} style={StyleSheet.absoluteFill}>
+                          {mask.inverted && <View style={[styles.maskInvertedFill, { backgroundColor: maskFill }]} />}
+                          <View
+                            style={[
+                              styles.maskRadialCircle,
+                              {
+                                left: `${(mask.center?.x || 0.5) * 100 - (mask.radiusX || 0.35) * 100}%`,
+                                top: `${(mask.center?.y || 0.5) * 100 - (mask.radiusY || 0.35) * 100}%`,
+                                width: `${(mask.radiusX || 0.35) * 200}%`,
+                                height: `${(mask.radiusY || 0.35) * 200}%`,
+                                backgroundColor: maskFill,
+                                borderColor: maskColor,
+                                borderWidth: maskIsActive ? 3 : 2,
+                              }
+                            ]}
+                          />
+                          <Text style={[styles.maskOverlayLabel, { color: maskColor }]}>
+                            {mask.inverted ? 'INVERTED RADIAL' : 'RADIAL'}
+                          </Text>
+                        </View>
                       );
                     } else if (mask.type === 'linear') {
                       const startY = (mask.start?.y || 0) * 100;
                       const endY = (mask.end?.y || 0.4) * 100;
                       return (
-                        <View
-                          key={mask.id}
-                          style={[
-                            styles.maskLinearGrad,
-                            {
-                              top: `${Math.min(startY, endY)}%`,
-                              height: `${Math.abs(endY - startY)}%`,
-                              left: 0,
-                              right: 0,
-                            }
-                          ]}
-                        />
+                        <View key={mask.id} style={StyleSheet.absoluteFill}>
+                          {mask.inverted && <View style={[styles.maskInvertedFill, { backgroundColor: maskFill }]} />}
+                          <View
+                            style={[
+                              styles.maskLinearGrad,
+                              {
+                                top: `${Math.min(startY, endY)}%`,
+                                height: `${Math.max(2, Math.abs(endY - startY))}%`,
+                                left: 0,
+                                right: 0,
+                                backgroundColor: maskFill,
+                                borderColor: maskColor,
+                                borderTopWidth: maskIsActive ? 3 : 2,
+                                borderBottomWidth: maskIsActive ? 3 : 2,
+                              }
+                            ]}
+                          />
+                          <Text style={[styles.maskOverlayLabel, { color: maskColor }]}>
+                            {mask.inverted ? 'INVERTED LINEAR' : 'LINEAR'}
+                          </Text>
+                        </View>
                       );
                     } else if (mask.type === 'brush') {
-                      return (mask.points || []).map((pt, i) => (
-                        <View
-                          key={`${mask.id}_pt_${i}`}
-                          style={[
-                            styles.brushStrokeDot,
-                            {
-                              left: `${pt.x * 100}%`,
-                              top: `${pt.y * 100}%`,
-                            }
-                          ]}
-                        />
-                      ));
+                      const brushRadius = (mask as any).brushRadius || 0.04;
+                      const brushDiameter = Math.max(10, brushRadius * imgDisplayWidth * 2);
+                      return (
+                        <View key={mask.id} style={StyleSheet.absoluteFill}>
+                          {mask.inverted && <View style={[styles.maskInvertedFill, { backgroundColor: maskFill }]} />}
+                          {(mask.points || []).map((pt, i) => (
+                            <View
+                              key={`${mask.id}_pt_${i}`}
+                              style={[
+                                styles.brushStrokeDot,
+                                {
+                                  left: `${pt.x * 100}%`,
+                                  top: `${pt.y * 100}%`,
+                                  width: brushDiameter,
+                                  height: brushDiameter,
+                                  marginLeft: -brushDiameter / 2,
+                                  marginTop: -brushDiameter / 2,
+                                  backgroundColor: maskFill,
+                                  borderColor: maskColor,
+                                  borderWidth: maskIsActive ? 1 : 0,
+                                }
+                              ]}
+                            />
+                          ))}
+                          <Text style={[styles.maskOverlayLabel, { color: maskColor }]}>
+                            {mask.inverted ? 'INVERTED BRUSH' : 'BRUSH'}
+                          </Text>
+                        </View>
+                      );
                     }
                     return null;
                   })}
@@ -1686,9 +2000,12 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
         ) : activeTab === 'masking' ? (
           <MaskingPanel />
         ) : activeTab === 'erase' ? (
-          <SmartErasePanel />
+          <SmartErasePanel settings={eraseSettings} onSettingsChange={setEraseSettings} />
         ) : activeTab === 'crop' ? (
-          <CropEditor />
+          <CropEditor
+            selectedAspectRatio={cropAspectMode}
+            onAspectRatioChange={setCropAspectMode}
+          />
         ) : activeTab === 'presets' ? (
           <ScrollView
             horizontal
@@ -1703,11 +2020,13 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                   key={preset.id}
                   style={[styles.presetCard, isApplied && styles.presetCardActive]}
                   onPress={() => applyPreset(preset)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isApplied }}
                 >
                   <Text style={[styles.presetName, isApplied && styles.presetNameActive]}>
                     {preset.name}
                   </Text>
-                  {isApplied && <Text style={styles.presetActiveCheck}>✓</Text>}
+                  {isApplied && <Text style={styles.presetActiveCheck}>ACTIVE ✓</Text>}
                 </TouchableOpacity>
               );
             })}
@@ -1920,7 +2239,9 @@ const styles = StyleSheet.create({
   // Crop overlay styles
   cropOverlay: {
     ...(StyleSheet.absoluteFill as any),
-    zIndex: 5
+    zIndex: 30,
+    touchAction: 'none' as any,
+    userSelect: 'none' as any
   },
   cropBoundary: {
     position: 'absolute',
@@ -1952,9 +2273,45 @@ const styles = StyleSheet.create({
   cornerTR: { top: -2, right: -2, borderBottomWidth: 0, borderLeftWidth: 0 },
   cornerBL: { bottom: -2, left: -2, borderTopWidth: 0, borderRightWidth: 0 },
   cornerBR: { bottom: -2, right: -2, borderTopWidth: 0, borderLeftWidth: 0 },
+  cropSideHandle: {
+    position: 'absolute',
+    width: 24,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: colors.accentPrimary
+  },
+  sideLeft: {
+    left: -12,
+    top: '50%',
+    marginTop: -2.5,
+    transform: [{ rotate: '90deg' }]
+  },
+  sideRight: {
+    right: -12,
+    top: '50%',
+    marginTop: -2.5,
+    transform: [{ rotate: '90deg' }]
+  },
+  sideTop: {
+    top: -2.5,
+    left: '50%',
+    marginLeft: -12
+  },
+  sideBottom: {
+    bottom: -2.5,
+    left: '50%',
+    marginLeft: -12
+  },
   cropDimmed: {
     position: 'absolute',
     backgroundColor: 'rgba(0, 0, 0, 0.55)',
+  },
+  fallbackImageCanvas: {
+    position: 'absolute',
+    overflow: 'visible'
+  },
+  fallbackSourceImage: {
+    position: 'absolute'
   },
   healingSpotOverlay: {
     position: 'absolute',
@@ -1985,7 +2342,23 @@ const styles = StyleSheet.create({
   },
   maskRubylithOverlay: {
     ...(StyleSheet.absoluteFill as any),
-    zIndex: 6
+    zIndex: 6,
+    overflow: 'hidden'
+  },
+  maskInvertedFill: {
+    ...(StyleSheet.absoluteFill as any),
+    opacity: 0.9
+  },
+  maskOverlayLabel: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    textShadowColor: 'rgba(0,0,0,0.85)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2
   },
   maskRadialCircle: {
     position: 'absolute',

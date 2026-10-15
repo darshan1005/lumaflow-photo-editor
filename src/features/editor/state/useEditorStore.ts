@@ -18,6 +18,13 @@ import {
   createNewEditDocument
 } from '../models/EditDocument';
 import { CurvePoint, HealingSpot, MaskAdjustment } from '../../../types';
+import {
+  applyPresetToDocument,
+  normalizeCropTransform,
+  normalizeEditDocumentToolState,
+  normalizeHealingSpot,
+  normalizeMaskAdjustment
+} from '../presets/PresetManager';
 
 export type EditorTab = 'light' | 'color' | 'curves' | 'grading' | 'mixer' | 'masking' | 'erase' | 'crop' | 'presets';
 
@@ -80,6 +87,32 @@ export interface EditorState {
 export const useEditorStore = create<EditorState>((set, get) => {
   const history = new HistoryManager(50);
   const defaultDoc = createNewEditDocument('default', 'assets/sample.jpg');
+  let adjustmentInProgress = false;
+
+  const getActiveMaskId = (masks: MaskAdjustment[], preferredId: string | null): string | null => {
+    if (masks.length === 0) return null;
+    if (preferredId && masks.some(mask => mask.id === preferredId)) return preferredId;
+    return masks[0].id;
+  };
+
+  const recordHistory = (document: EditDocument): void => {
+    // beginAdjustment records the drag's starting point once. Skipping the
+    // per-frame pushes makes one drag one undo step without changing callers.
+    if (!adjustmentInProgress) history.push(document);
+  };
+
+  const createToolId = (prefix: 'heal' | 'mask'): string => (
+    `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
+  );
+
+  const commitDocument = (document: EditDocument, preferredMaskId = get().activeMaskId): void => {
+    set({
+      currentDocument: document,
+      activeMaskId: getActiveMaskId(document.masks || [], preferredMaskId),
+      canUndo: history.canUndo(),
+      canRedo: history.canRedo()
+    });
+  };
 
   return {
     activeProject: null,
@@ -94,11 +127,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
     activeMaskId: null,
 
     initializeSession: (project, initialDoc) => {
-      const doc = initialDoc ? cloneEditDocument(initialDoc) : createNewEditDocument(project.assetId, project.sourceUri);
+      const doc = normalizeEditDocumentToolState(
+        initialDoc ? cloneEditDocument(initialDoc) : createNewEditDocument(project.assetId, project.sourceUri)
+      );
       history.clear();
+      adjustmentInProgress = false;
       set({
         activeProject: project,
         currentDocument: doc,
+        activeMaskId: getActiveMaskId(doc.masks || [], null),
         canUndo: false,
         canRedo: false
       });
@@ -107,8 +144,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setActiveTab: (tab) => set({ activeTab: tab }),
 
     beginAdjustment: () => {
+      if (adjustmentInProgress) return;
       const { currentDocument } = get();
       history.push(currentDocument);
+      adjustmentInProgress = true;
       set({
         canUndo: history.canUndo(),
         canRedo: history.canRedo()
@@ -116,6 +155,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     },
 
     endAdjustment: () => {
+      adjustmentInProgress = false;
       set({
         canUndo: history.canUndo(),
         canRedo: history.canRedo()
@@ -125,21 +165,17 @@ export const useEditorStore = create<EditorState>((set, get) => {
     updateBasic: (key, value, commitToHistory = false) => {
       const { currentDocument } = get();
       if (commitToHistory) {
-        history.push(currentDocument);
+        recordHistory(currentDocument);
       }
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.basic[key] = value;
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     applyAlgorithmicAutoLight: (adj) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.basic.exposure = adj.exposure;
       nextDoc.basic.contrast = adj.contrast;
@@ -150,56 +186,40 @@ export const useEditorStore = create<EditorState>((set, get) => {
       nextDoc.basic.clarity = adj.clarity;
       nextDoc.basic.sharpening = adj.sharpening;
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     updateGradingTone: (wheel, key, value) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.colorGrading[wheel][key] = value;
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     updateGradingParams: (blending, balance) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.colorGrading.blending = blending;
       nextDoc.colorGrading.balance = balance;
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     updateHslMixer: (channel, key, value) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.hslMixer[channel][key] = value;
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     updateCurvePoint: (channel, index, point) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       if (!nextDoc.curves) nextDoc.curves = createDefaultToneCurves();
       nextDoc.curves[channel][index] = {
@@ -207,16 +227,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
         y: Math.max(0, Math.min(255, Math.round(point.y)))
       };
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     updateCurveChannel: (channel, points) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       if (!nextDoc.curves) nextDoc.curves = createDefaultToneCurves();
       nextDoc.curves[channel] = points.map(pt => ({
@@ -224,16 +240,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
         y: Math.max(0, Math.min(255, Math.round(pt.y)))
       }));
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     resetCurves: (channel) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       const defCurves = createDefaultToneCurves();
       if (channel) {
@@ -243,149 +255,120 @@ export const useEditorStore = create<EditorState>((set, get) => {
         nextDoc.curves = defCurves;
       }
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     setSplitPosition: (pos) => set({ splitPosition: Math.max(0.05, Math.min(0.95, pos)) }),
 
     updateCrop: (update) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
-      nextDoc.crop = { ...nextDoc.crop, ...update };
+      nextDoc.crop = normalizeCropTransform(update, nextDoc.crop);
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     addHealingSpot: (spot) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       const newSpot: HealingSpot = {
-        ...spot,
-        id: `heal_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
+        ...normalizeHealingSpot(
+          { ...spot, id: createToolId('heal') } as Partial<HealingSpot> & Record<string, unknown>
+        )
       };
       nextDoc.healingSpots = [...(nextDoc.healingSpots || []), newSpot];
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     removeHealingSpot: (id) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.healingSpots = (nextDoc.healingSpots || []).filter(s => s.id !== id);
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
     clearHealingSpots: () => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.healingSpots = [];
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc);
     },
 
-    setActiveMaskId: (id) => set({ activeMaskId: id }),
+    setActiveMaskId: (id) => {
+      const { currentDocument } = get();
+      set({ activeMaskId: getActiveMaskId(currentDocument.masks || [], id) });
+    },
 
     addMask: (mask) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       const newMask: MaskAdjustment = {
-        ...mask,
-        id: `mask_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`
+        ...normalizeMaskAdjustment(
+          { ...mask, id: createToolId('mask') } as Partial<MaskAdjustment> & Record<string, unknown>
+        )
       };
       nextDoc.masks = [...(nextDoc.masks || []), newMask];
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        activeMaskId: newMask.id,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      commitDocument(nextDoc, newMask.id);
     },
 
     updateMask: (id, update) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      const existingMask = (currentDocument.masks || []).find(mask => mask.id === id);
+      if (!existingMask) return;
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
-      nextDoc.masks = (nextDoc.masks || []).map(m => (m.id === id ? { ...m, ...update } : m));
-      nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
+      const rawUpdate = update as Partial<MaskAdjustment> & Record<string, unknown>;
+      const mergedMask = { ...existingMask, ...rawUpdate } as Partial<MaskAdjustment> & Record<string, unknown>;
+      const mergedMaskRecord = mergedMask as Record<string, unknown>;
+      (['start', 'end', 'center'] as const).forEach(key => {
+        if (rawUpdate[key] && typeof rawUpdate[key] === 'object') {
+          mergedMaskRecord[key] = {
+            ...(existingMask[key] || {}),
+            ...(rawUpdate[key] as Record<string, unknown>)
+          };
+        }
       });
+      nextDoc.masks = (nextDoc.masks || []).map(mask => (
+        mask.id === id
+          ? normalizeMaskAdjustment(mergedMask, existingMask, id)
+          : mask
+      ));
+      nextDoc.updatedAt = Date.now();
+      commitDocument(nextDoc);
     },
 
     removeMask: (id) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.masks = (nextDoc.masks || []).filter(m => m.id !== id);
       nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        activeMaskId: null,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      const preferredMaskId = get().activeMaskId === id ? null : get().activeMaskId;
+      commitDocument(nextDoc, preferredMaskId);
     },
 
     applyPreset: (preset) => {
       const { currentDocument } = get();
-      history.push(currentDocument);
-      const nextDoc = cloneEditDocument(currentDocument);
-      nextDoc.appliedPresetId = preset.id;
-      if (preset.documentState.basic) {
-        nextDoc.basic = { ...nextDoc.basic, ...preset.documentState.basic };
-      }
-      if (preset.documentState.colorGrading) {
-        nextDoc.colorGrading = { ...nextDoc.colorGrading, ...preset.documentState.colorGrading };
-      }
-      if (preset.documentState.hslMixer) {
-        nextDoc.hslMixer = [...preset.documentState.hslMixer];
-      }
-      nextDoc.updatedAt = Date.now();
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      recordHistory(currentDocument);
+      const nextDoc = applyPresetToDocument(currentDocument, preset);
+      commitDocument(nextDoc);
     },
 
     undo: () => {
       const { currentDocument } = get();
       const previous = history.undo(currentDocument);
       if (previous) {
-        set({
-          currentDocument: previous,
-          canUndo: history.canUndo(),
-          canRedo: history.canRedo()
-        });
+        const restored = normalizeEditDocumentToolState(previous);
+        commitDocument(restored);
       }
     },
 
@@ -393,17 +376,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const { currentDocument } = get();
       const next = history.redo(currentDocument);
       if (next) {
-        set({
-          currentDocument: next,
-          canUndo: history.canUndo(),
-          canRedo: history.canRedo()
-        });
+        const restored = normalizeEditDocumentToolState(next);
+        commitDocument(restored);
       }
     },
 
     resetActiveModule: () => {
       const { currentDocument, activeTab } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
 
       if (activeTab === 'light') {
@@ -440,28 +420,24 @@ export const useEditorStore = create<EditorState>((set, get) => {
         nextDoc.appliedPresetId = undefined;
       }
 
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      nextDoc.updatedAt = Date.now();
+      commitDocument(nextDoc, activeTab === 'masking' ? null : get().activeMaskId);
     },
 
     resetAllAdjustments: () => {
       const { currentDocument } = get();
-      history.push(currentDocument);
+      recordHistory(currentDocument);
       const nextDoc = cloneEditDocument(currentDocument);
       nextDoc.basic = createDefaultBasicAdjustments();
       nextDoc.colorGrading = createDefaultColorGrading();
       nextDoc.curves = createDefaultToneCurves();
       nextDoc.hslMixer = createDefaultHslMixer();
       nextDoc.crop = createDefaultCrop();
+      nextDoc.healingSpots = [];
+      nextDoc.masks = [];
       nextDoc.appliedPresetId = undefined;
-      set({
-        currentDocument: nextDoc,
-        canUndo: history.canUndo(),
-        canRedo: history.canRedo()
-      });
+      nextDoc.updatedAt = Date.now();
+      commitDocument(nextDoc, null);
     },
 
     toggleSplitView: () => set(state => ({ isSplitViewActive: !state.isSplitViewActive })),
