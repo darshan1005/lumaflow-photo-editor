@@ -76,6 +76,7 @@ export interface EditorState {
   updateMask: (id: string, update: Partial<MaskAdjustment>) => void;
   removeMask: (id: string) => void;
   applyPreset: (preset: Preset) => void;
+  deselectPreset: () => void;
   undo: () => void;
   redo: () => void;
   resetActiveModule: () => void;
@@ -88,6 +89,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   const history = new HistoryManager(50);
   const defaultDoc = createNewEditDocument('default', 'assets/sample.jpg');
   let adjustmentInProgress = false;
+  let prePresetDocument: EditDocument | null = null;
 
   const getActiveMaskId = (masks: MaskAdjustment[], preferredId: string | null): string | null => {
     if (masks.length === 0) return null;
@@ -132,6 +134,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       );
       history.clear();
       adjustmentInProgress = false;
+      prePresetDocument = null;
       set({
         activeProject: project,
         currentDocument: doc,
@@ -358,8 +361,42 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     applyPreset: (preset) => {
       const { currentDocument } = get();
+      if (currentDocument.appliedPresetId === preset.id) {
+        get().deselectPreset();
+        return;
+      }
       recordHistory(currentDocument);
-      const nextDoc = applyPresetToDocument(currentDocument, preset);
+      if (!currentDocument.appliedPresetId) {
+        prePresetDocument = cloneEditDocument(currentDocument);
+      }
+      const baseDoc = prePresetDocument ? cloneEditDocument(prePresetDocument) : currentDocument;
+      const nextDoc = applyPresetToDocument(baseDoc, preset);
+      // Preserve current user crops, masks, and healing spots
+      nextDoc.crop = JSON.parse(JSON.stringify(currentDocument.crop));
+      nextDoc.masks = JSON.parse(JSON.stringify(currentDocument.masks));
+      nextDoc.healingSpots = JSON.parse(JSON.stringify(currentDocument.healingSpots));
+      commitDocument(nextDoc);
+    },
+
+    deselectPreset: () => {
+      const { currentDocument } = get();
+      if (!currentDocument.appliedPresetId) return;
+      recordHistory(currentDocument);
+      const nextDoc = cloneEditDocument(currentDocument);
+      if (prePresetDocument) {
+        nextDoc.basic = JSON.parse(JSON.stringify(prePresetDocument.basic));
+        nextDoc.colorGrading = JSON.parse(JSON.stringify(prePresetDocument.colorGrading));
+        nextDoc.hslMixer = JSON.parse(JSON.stringify(prePresetDocument.hslMixer));
+        nextDoc.curves = JSON.parse(JSON.stringify(prePresetDocument.curves));
+      } else {
+        nextDoc.basic = createDefaultBasicAdjustments();
+        nextDoc.colorGrading = createDefaultColorGrading();
+        nextDoc.hslMixer = createDefaultHslMixer();
+        nextDoc.curves = createDefaultToneCurves();
+      }
+      nextDoc.appliedPresetId = undefined;
+      nextDoc.updatedAt = Date.now();
+      prePresetDocument = null;
       commitDocument(nextDoc);
     },
 
@@ -417,7 +454,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
       } else if (activeTab === 'masking') {
         nextDoc.masks = [];
       } else if (activeTab === 'presets') {
-        nextDoc.appliedPresetId = undefined;
+        get().deselectPreset();
+        return;
       }
 
       nextDoc.updatedAt = Date.now();

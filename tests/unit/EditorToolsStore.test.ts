@@ -288,6 +288,28 @@ describe('Editor tools store correctness', () => {
 
     state.redo();
     expect(useEditorStore.getState().currentDocument.appliedPresetId).toBe(preset.id);
+
+    // Tapping the same preset again de-selects it and restores baseline
+    store.applyPreset(preset);
+    state = useEditorStore.getState();
+    expect(state.currentDocument.appliedPresetId).toBeUndefined();
+    expect(state.currentDocument.colorGrading.shadows.hue).toBe(0);
+    expect(state.currentDocument.hslMixer[0].hue).toBe(0);
+  });
+
+  test('deselectPreset explicitly reverts applied preset to baseline', () => {
+    const store = useEditorStore.getState();
+    const preset = asPreset({
+      basic: { contrast: 30 } as unknown as EditDocument['basic']
+    });
+
+    store.applyPreset(preset);
+    expect(useEditorStore.getState().currentDocument.appliedPresetId).toBe(preset.id);
+    expect(useEditorStore.getState().currentDocument.basic.contrast).toBe(30);
+
+    store.deselectPreset();
+    expect(useEditorStore.getState().currentDocument.appliedPresetId).toBeUndefined();
+    expect(useEditorStore.getState().currentDocument.basic.contrast).toBe(0);
   });
 
   test('coalesces slider updates between beginAdjustment and endAdjustment', () => {

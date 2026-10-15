@@ -127,6 +127,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   const redo = useEditorStore(state => state.redo);
   const resetModule = useEditorStore(state => state.resetActiveModule);
   const applyPreset = useEditorStore(state => state.applyPreset);
+  const deselectPreset = useEditorStore(state => state.deselectPreset);
   const beginAdjustment = useEditorStore(state => state.beginAdjustment);
   const endAdjustment = useEditorStore(state => state.endAdjustment);
   const addHealingSpot = useEditorStore(state => state.addHealingSpot);
@@ -2100,13 +2101,26 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
             style={styles.presetScroll}
             contentContainerStyle={styles.presetContent}
           >
+            {/* None / Original De-selection Option */}
+            <TouchableOpacity
+              style={[styles.presetCard, !currentDoc.appliedPresetId && styles.presetCardActive]}
+              onPress={deselectPreset}
+              accessibilityRole="button"
+              accessibilityState={{ selected: !currentDoc.appliedPresetId }}
+            >
+              <Text style={[styles.presetName, !currentDoc.appliedPresetId && styles.presetNameActive]}>
+                None
+              </Text>
+              {!currentDoc.appliedPresetId && <Text style={styles.presetActiveCheck}>ACTIVE ✓</Text>}
+            </TouchableOpacity>
+
             {BUILT_IN_PRESETS.map(preset => {
               const isApplied = currentDoc.appliedPresetId === preset.id;
               return (
                 <TouchableOpacity
                   key={preset.id}
                   style={[styles.presetCard, isApplied && styles.presetCardActive]}
-                  onPress={() => applyPreset(preset)}
+                  onPress={() => isApplied ? deselectPreset() : applyPreset(preset)}
                   accessibilityRole="button"
                   accessibilityState={{ selected: isApplied }}
                 >
