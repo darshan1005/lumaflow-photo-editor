@@ -42,6 +42,7 @@ import { RealtimeHistogram } from '../components/RealtimeHistogram';
 import { SmartErasePanel, SmartEraseSettings } from '../components/SmartErasePanel';
 import { getActiveImageEngine } from '../../../core/image-engine/EngineFactory';
 import { renderDocument } from '../../../core/image-engine/renderDocument';
+import { generateHslMixerMatrix } from '../../../core/image-engine/ColorGradingEngine';
 
 interface EditorScreenProps {
   onBack: () => void;
@@ -326,11 +327,9 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
     }
 
     let isCancelled = false;
-    // Do not leave the previous crop-sized bitmap on screen while the new
-    // document is rendering. The source fallback below is crop-positioned so
-    // the viewport remains truthful during this short asynchronous window.
-    setProcessedPreview(null);
-    const renderPreview = async () => {
+    // Debounce preview rendering slightly during slider interactions so rapid drags
+    // remain smooth and hardware accelerated without choking CPU rendering
+    const debounceTimer = setTimeout(async () => {
       try {
         if (previewImageSourceRef.current !== sourceUri || !previewImagePromiseRef.current) {
           const image = new (window as any).Image();
@@ -347,7 +346,7 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
 
         const naturalWidth = image.naturalWidth || activeProject?.originalWidth || 1920;
         const naturalHeight = image.naturalHeight || activeProject?.originalHeight || 1080;
-        const maxDimension = 900;
+        const maxDimension = 720;
         const scale = Math.min(1, maxDimension / Math.max(naturalWidth, naturalHeight));
         const width = Math.max(1, Math.round(naturalWidth * scale));
         const height = Math.max(1, Math.round(naturalHeight * scale));
@@ -390,18 +389,17 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
           });
         }
       } catch (error) {
-        // A tainted canvas can still display the source image. Export reports
-        // its own error, while the editor remains usable in this fallback.
+        // A tainted canvas can still display the source image with SVG/CSS filters.
         if (!isCancelled) {
           console.warn('Processed web preview unavailable:', error);
           setProcessedPreview(null);
         }
       }
-    };
+    }, 40);
 
-    renderPreview();
     return () => {
       isCancelled = true;
+      clearTimeout(debounceTimer);
     };
   }, [activeProject?.sourceUri, activeProject?.originalHeight, activeProject?.originalWidth, activeTab, currentDoc]);
 
@@ -925,15 +923,43 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
   const sepia = Math.max(0, b.temperature / 250 + (curvesMod.tintR > 0 ? curvesMod.tintR * 0.3 : 0));
   const hueRotate = `${(b.tint / 100) * 25 + (curvesMod.tintG * 20 - curvesMod.tintB * 20)}deg`;
 
-  // Sharpening drop-shadow on Web for crisp edge enhancement
-  const sharpeningFilter = b.sharpening > 0
-    ? ` drop-shadow(0 0 0.5px rgba(0,0,0,${((b.sharpening / 100) * 0.65).toFixed(2)}))`
+  // Pixel-readable web previews use renderDocument below. These filters are
+  // the image-level fallback for tainted/unreadable canvases and native
+  // previews, so the source image never silently drops Light adjustments.
+  // Shadows/whites/blacks are tone-selective in the CPU path. A native image
+  // filter cannot select luminance ranges, but this approximation still
+  // changes the actual image pixels and is deliberately combined with the
+  // low-opacity legacy overlays below for devices without filter support.
+  const fallbackBrightness = Math.max(0.25, Math.min(3.0,
+    exposureBright * (
+      1 +
+      (b.shadows / 100) * 0.16 +
+      (b.whites / 100) * 0.10 +
+      (b.blacks / 100) * 0.14
+    )
+  ));
+  const fallbackContrast = Math.max(0.2, Math.min(3.5,
+    baseContrast * (
+      1 +
+      ((b.whites - b.blacks) / 100) * 0.22 +
+      (b.clarity / 100) * 0.32 +
+      (b.sharpening / 100) * 0.28
+    )
+  ));
+  const fallbackBlur = b.clarity < 0
+    ? ` blur(${(Math.abs(b.clarity) / 100 * 1.25).toFixed(2)}px)`
     : '';
-
-  // The web image is already rendered by renderDocument. Native keeps the
-  // existing lightweight fallback filter until a native preview buffer is
-  // available.
-  const webFilterString = `brightness(${exposureBright.toFixed(3)}) contrast(${baseContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${sharpeningFilter}`;
+  const webFilterString = `brightness(${fallbackBrightness.toFixed(3)}) contrast(${fallbackContrast.toFixed(3)}) saturate(${saturation.toFixed(3)}) sepia(${Math.abs(sepia).toFixed(3)}) hue-rotate(${hueRotate})${fallbackBlur}`;
+  const nativePreviewFilter: any[] = [
+    { brightness: fallbackBrightness },
+    { contrast: fallbackContrast },
+    { saturate: saturation },
+    ...(b.clarity < 0 ? [{ blur: Math.abs(b.clarity) / 100 * 1.25 }] : [])
+  ];
+  const toneFilterId = 'luma-tone-filter';
+  const hslMixerMatrix = useMemo(() => {
+    return generateHslMixerMatrix(currentDoc.hslMixer);
+  }, [currentDoc.hslMixer]);
   const fallbackImageTransform = {
     transform: [
       { rotate: `${crop.rotation + crop.straightenAngle}deg` },
@@ -941,9 +967,14 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
       { scaleY: crop.flipVertical ? -1 : 1 }
     ]
   };
-  const webFilterStyle: any = isHoldingOriginal || (Platform.OS === 'web' && processedPreview)
+  const fallbackPreviewFilterStyle: any = Platform.OS === 'web'
+    ? { filter: `url(#${toneFilterId}) ${webFilterString}` }
+    : { filter: nativePreviewFilter };
+  const webFilterStyle: any = isHoldingOriginal
     ? fallbackImageTransform
-    : { ...fallbackImageTransform, filter: webFilterString };
+    : (Platform.OS === 'web' && processedPreview)
+      ? fallbackImageTransform
+      : { ...fallbackImageTransform, filter: `url(#${toneFilterId}) ${webFilterString}` };
 
   // Color temperature tint overlay
   const tempOverlayColor =
@@ -1337,6 +1368,27 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
               } as any) : {}
             ]}
           >
+            {/* SVG Photometric Filter for Web (Live 8-Channel HSL Mixer feColorMatrix) */}
+            {Platform.OS === 'web' && React.createElement(
+              'svg',
+              {
+                style: { position: 'absolute', width: 0, height: 0, pointerEvents: 'none' },
+                'aria-hidden': 'true',
+              },
+              React.createElement(
+                'defs',
+                null,
+                React.createElement(
+                  'filter',
+                  { id: toneFilterId, key: toneFilterId, colorInterpolationFilters: 'sRGB' },
+                  React.createElement('feColorMatrix', {
+                    type: 'matrix',
+                    values: hslMixerMatrix,
+                  })
+                )
+              )
+            )}
+
             {/* The Constrained Photo Canvas (Matches exact photo aspect ratio - ZERO bleed into black bars!) */}
             <View
               style={[
@@ -1432,7 +1484,12 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                             { scale: straightenCover },
                             { scaleX: crop.flipHorizontal ? -1 : 1 },
                             { scaleY: crop.flipVertical ? -1 : 1 }
-                          ]
+                          ],
+                          // Apply the fallback to the bitmap itself. A filter
+                          // on the clipping View is ignored by React Native on
+                          // some platforms and can make Light controls look
+                          // like they work in state but not on the photo.
+                          ...(!isHoldingOriginal ? fallbackPreviewFilterStyle : {})
                         }
                       ]}
                       resizeMode="cover"
@@ -1719,6 +1776,36 @@ export const EditorScreen: React.FC<EditorScreenProps> = ({ onBack }) => {
                         ]}
                       />
                     )}
+                  </>
+                )}
+
+                {/* 8-Channel Selective HSL Mixer Layers (Active on Native Mobile) */}
+                {Platform.OS !== 'web' && !isHoldingOriginal && currentDoc.hslMixer && (
+                  <>
+                    {currentDoc.hslMixer.map((ch, idx) => {
+                      if (ch.saturation === 0 && ch.luminance === 0 && ch.hue === 0) return null;
+                      const CH_HUES = [0, 25, 45, 120, 185, 215, 280, 320];
+                      const chHue = (CH_HUES[idx] + ch.hue * 0.45 + 360) % 360;
+                      const hueWeight = (Math.abs(ch.hue) / 100) * 0.35;
+                      const satWeight = (Math.abs(ch.saturation) / 100) * 0.30;
+                      const lumWeight = (Math.abs(ch.luminance) / 100) * 0.20;
+                      const totalOpacity = Math.min(0.48, hueWeight + satWeight + lumWeight);
+                      const baseSat = Math.abs(ch.hue) > 0 && ch.saturation === 0 ? 50 : Math.max(10, 50 + ch.saturation * 0.45);
+                      return (
+                        <View
+                          key={`hsl_ch_${idx}`}
+                          style={[
+                            StyleSheet.absoluteFill,
+                            {
+                              backgroundColor: `hsl(${chHue}, ${baseSat}%, ${Math.max(10, Math.min(90, 50 + ch.luminance * 0.35))}%)`,
+                              opacity: totalOpacity,
+                              mixBlendMode: (ch.saturation < 0 && Math.abs(ch.saturation) > Math.abs(ch.hue)) ? 'color' : 'soft-light' as any,
+                              pointerEvents: 'none' as any
+                            }
+                          ]}
+                        />
+                      );
+                    })}
                   </>
                 )}
 

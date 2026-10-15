@@ -201,6 +201,20 @@ export class CpuImageEngine implements IImageEngine {
     return d > 0.5 ? 1.0 - d : d;
   }
 
+  /**
+   * Move a channel toward the endpoint selected by a signed tone control.
+   * Positive values lift toward white and negative values pull toward black.
+   * Applying the signed amount to the selected endpoint is important for
+   * whites/blacks: `(1 - channel) * negativeAmount` barely changes an already
+   * bright pixel, which makes the negative control appear to do nothing.
+   */
+  private applyToneEndpoint(value: number, amount: number, weight: number, strength = 0.48): number {
+    const adjustment = amount * strength * weight;
+    return adjustment >= 0
+      ? clamp(value + (1 - value) * adjustment)
+      : clamp(value * (1 + adjustment));
+  }
+
   private createCurveLut(points: Array<{ x: number; y: number }> | undefined): Uint8Array {
     const lut = new Uint8Array(256);
     if (!points || points.length === 0) {
@@ -448,25 +462,26 @@ export class CpuImageEngine implements IImageEngine {
     const shadows = finiteOr(b.shadows, 0);
     if (Math.abs(shadows) > 0.001) {
       const weight = 1 - smoothstep(0, 0.6, luma);
-      const adjustment = shadows / 100 * 0.35 * weight;
-      r += (1 - r) * adjustment;
-      g += (1 - g) * adjustment;
-      blue += (1 - blue) * adjustment;
+      const amount = shadows / 100;
+      r = this.applyToneEndpoint(r, amount, weight);
+      g = this.applyToneEndpoint(g, amount, weight);
+      blue = this.applyToneEndpoint(blue, amount, weight);
     }
 
     // Whites affect the upper tonal shoulder, while blacks affect only the
     // lower shoulder. They are intentionally separate from highlights/shadows.
     luma = 0.2126 * r + 0.7152 * g + 0.0722 * blue;
-    const whiteWeight = smoothstep(0.5, 1, luma);
-    const whiteAdjustment = finiteOr(b.whites, 0) / 100 * 0.4 * whiteWeight;
-    r += (1 - r) * whiteAdjustment;
-    g += (1 - g) * whiteAdjustment;
-    blue += (1 - blue) * whiteAdjustment;
+    const whiteWeight = smoothstep(0.45, 1, luma);
+    const whiteAmount = finiteOr(b.whites, 0) / 100;
+    r = this.applyToneEndpoint(r, whiteAmount, whiteWeight);
+    g = this.applyToneEndpoint(g, whiteAmount, whiteWeight);
+    blue = this.applyToneEndpoint(blue, whiteAmount, whiteWeight);
+
     const blackWeight = 1 - smoothstep(0, 0.5, luma);
-    const blackAdjustment = finiteOr(b.blacks, 0) / 100 * 0.4 * blackWeight;
-    r += (1 - r) * blackAdjustment;
-    g += (1 - g) * blackAdjustment;
-    blue += (1 - blue) * blackAdjustment;
+    const blackAmount = finiteOr(b.blacks, 0) / 100;
+    r = this.applyToneEndpoint(r, blackAmount, blackWeight);
+    g = this.applyToneEndpoint(g, blackAmount, blackWeight);
+    blue = this.applyToneEndpoint(blue, blackAmount, blackWeight);
 
     luma = 0.2126 * r + 0.7152 * g + 0.0722 * blue;
     const shadowWeight = 1 - smoothstep(0, settings.midThreshold + settings.blendWidth * 0.5, luma);
@@ -487,17 +502,26 @@ export class CpuImageEngine implements IImageEngine {
 
     const [h, s, l] = this.rgbToHsl(r, g, blue);
     const hueCenters = [0, 0.0833, 0.1667, 0.3333, 0.5, 0.6667, 0.7778, 0.8889];
-    const hueWidths = [0.09, 0.07, 0.08, 0.12, 0.09, 0.11, 0.08, 0.09];
+    const hueWidths = [0.08, 0.08, 0.09, 0.14, 0.14, 0.13, 0.10, 0.10];
     let hueShift = 0;
     let saturationScale = 0;
     let luminanceShift = 0;
-    for (let channel = 0; channel < 8; channel++) {
-      const adjustment = mixer[channel] || IDENTITY_HSL_CHANNEL;
-      const hueDistance = this.hueDistance(h, hueCenters[channel]);
-      const channelWeight = Math.pow(Math.max(0, 1 - hueDistance / hueWidths[channel]), 2);
-      hueShift += channelWeight * finiteOr(adjustment.hue, 0) / 100 * 0.12;
-      saturationScale += channelWeight * finiteOr(adjustment.saturation, 0) / 100;
-      luminanceShift += channelWeight * finiteOr(adjustment.luminance, 0) / 100 * 0.3;
+    // HSL hue is undefined for achromatic pixels. `rgbToHsl` returns zero for
+    // that case, but treating zero as the red hue would make a red-channel
+    // luminance edit change every neutral gray pixel. Only chromatic pixels
+    // participate in selective hue-band adjustments; their saturation and
+    // lightness are still edited in HSL space below.
+    if (s > 1e-5) {
+      for (let channel = 0; channel < 8; channel++) {
+        const adjustment = mixer[channel] || IDENTITY_HSL_CHANNEL;
+        const hueDistance = this.hueDistance(h, hueCenters[channel]);
+        if (hueDistance < hueWidths[channel]) {
+          const channelWeight = Math.pow(1 - hueDistance / hueWidths[channel], 1.5);
+          hueShift += channelWeight * finiteOr(adjustment.hue, 0) / 100 * 0.16;
+          saturationScale += channelWeight * finiteOr(adjustment.saturation, 0) / 100;
+          luminanceShift += channelWeight * finiteOr(adjustment.luminance, 0) / 100 * 0.35;
+        }
+      }
     }
     const newH = (h + hueShift + 1) % 1;
     let newS = clamp(s * (1 + saturationScale));
@@ -634,19 +658,31 @@ export class CpuImageEngine implements IImageEngine {
       const sharpening = finiteOr(basic.sharpening, 0);
       if (Math.abs(clarity) > 0.001 || Math.abs(sharpening) > 0.001) {
         let blurLuma = 0;
-        let samples = 0;
+        let sampleWeight = 0;
         for (let oy = -1; oy <= 1; oy++) {
           for (let ox = -1; ox <= 1; ox++) {
             const sampleX = clamp(x + ox, 0, width - 1);
             const sampleY = clamp(y + oy, 0, height - 1);
             const sampleOffset = (sampleY * width + sampleX) * 4;
-            blurLuma += (0.2126 * base[sampleOffset] + 0.7152 * base[sampleOffset + 1] + 0.0722 * base[sampleOffset + 2]) / 255;
-            samples++;
+            // A small Gaussian-like kernel gives clarity a local-contrast
+            // response and sharpening a stable unsharp-mask response without
+            // making either control dependent on a full-screen texture.
+            const kernelWeight = ox === 0 && oy === 0
+              ? 4
+              : ox === 0 || oy === 0
+                ? 2
+                : 1;
+            blurLuma += (
+              0.2126 * base[sampleOffset] +
+              0.7152 * base[sampleOffset + 1] +
+              0.0722 * base[sampleOffset + 2]
+            ) / 255 * kernelWeight;
+            sampleWeight += kernelWeight;
           }
         }
         const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        const detail = luma - blurLuma / samples;
-        const detailAmount = clarity / 100 * 0.35 + sharpening / 100 * 0.65;
+        const detail = luma - blurLuma / sampleWeight;
+        const detailAmount = clarity / 100 * 0.75 + sharpening / 100 * 1.1;
         r = clamp(r + detail * detailAmount);
         g = clamp(g + detail * detailAmount);
         b = clamp(b + detail * detailAmount);
